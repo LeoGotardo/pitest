@@ -1,31 +1,72 @@
+"""
+database.py — modelos SQLAlchemy e camada de acesso a dados
+===========================================================
+Define dois modelos:
+  Device — representa uma Raspberry Pi identificada pelo MAC address
+  Test   — representa o resultado de um único teste (lan/wlan/boot/usb/hotspot)
+
+A classe Database encapsula todas as operações de leitura e escrita,
+mantendo a lógica de negócio fora das rotas Flask.
+
+Inicialização:
+  O objeto `db` (SQLAlchemy) deve ser registrado na app Flask via
+  db.init_app(app) antes de qualquer operação.
+"""
+
 from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
 
 
 class Device(db.Model):
-    id         = db.Column(db.Integer, primary_key=True)
+    """Raspberry Pi registrada no sistema.
+
+    Identificada de forma única pelo MAC address. O campo device_id
+    armazena o hostname enviado pelo pitest.py (pode mudar entre runs).
+    """
+
+    id          = db.Column(db.Integer, primary_key=True)
     mac_address = db.Column(db.String(32), nullable=False, unique=True)
-    device_id  = db.Column(db.String(64), nullable=True)   # hostname from pitest
-    created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
-    updated_at = db.Column(db.DateTime, nullable=False, default=db.func.now(), onupdate=db.func.now())
-    tests      = db.relationship("Test", backref="device", lazy=True, order_by="Test.created_at.desc()")
+    device_id   = db.Column(db.String(64), nullable=True)
+    created_at  = db.Column(db.DateTime, nullable=False, default=db.func.now())
+    updated_at  = db.Column(db.DateTime, nullable=False, default=db.func.now(), onupdate=db.func.now())
+    tests       = db.relationship("Test", backref="device", lazy=True, order_by="Test.created_at.desc()")
 
 
 class Test(db.Model):
-    id        = db.Column(db.Integer, primary_key=True)
-    type      = db.Column(db.String(32), nullable=False)
-    status    = db.Column(db.String(32), nullable=False)
-    message   = db.Column(db.String(256), nullable=True)
-    details   = db.Column(db.JSON, nullable=True)
-    elapsed_s = db.Column(db.Float, nullable=True)
-    device_id = db.Column(db.Integer, db.ForeignKey("device.id"), nullable=False)
+    """Resultado de um teste individual em um Device.
+
+    Campos:
+      type      — tipo do teste: lan | wlan | boot | usb | hotspot
+      status    — resultado: pass | fail | error
+      message   — resumo legível do resultado
+      details   — payload JSON completo com métricas e diagnósticos
+      elapsed_s — tempo de execução do teste em segundos
+    """
+
+    id         = db.Column(db.Integer, primary_key=True)
+    type       = db.Column(db.String(32), nullable=False)
+    status     = db.Column(db.String(32), nullable=False)
+    message    = db.Column(db.String(256), nullable=True)
+    details    = db.Column(db.JSON, nullable=True)
+    elapsed_s  = db.Column(db.Float, nullable=True)
+    device_id  = db.Column(db.Integer, db.ForeignKey("device.id"), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
     updated_at = db.Column(db.DateTime, nullable=False, default=db.func.now(), onupdate=db.func.now())
 
 
 class Database:
+    """Camada de acesso a dados para Device e Test."""
+
     def commit_info(self, info: dict) -> Exception | None:
+        """Persiste um payload completo enviado pelo pitest.py.
+
+        Cria o Device se não existir (lookup por mac_address); caso contrário
+        atualiza o hostname. Em seguida cria um registro Test para cada tipo
+        presente em info['tests'].
+
+        Retorna None em sucesso ou a Exception em caso de erro (com rollback).
+        """
         try:
             mac       = info.get("mac_address")
             hostname  = info.get("device_id")
@@ -35,7 +76,7 @@ class Database:
             if not device:
                 device = Device(mac_address=mac, device_id=hostname)
                 db.session.add(device)
-                db.session.flush()  # get device.id before adding tests
+                db.session.flush()  # necessário para obter device.id antes de inserir os testes
             else:
                 device.device_id = hostname
 
@@ -57,16 +98,25 @@ class Database:
             return e
 
     def get_all_devices(self) -> list[Device]:
+        """Retorna todos os devices ordenados pelo mais recentemente atualizado."""
         return Device.query.order_by(Device.updated_at.desc()).all()
 
     def get_device(self, device_id: int) -> Device | None:
+        """Retorna um Device pelo id primário, ou None se não existir."""
         return Device.query.get(device_id)
 
     def get_tests(self, device_id: int) -> list[Test]:
+        """Retorna todos os testes de um device em ordem decrescente de data."""
         return Test.query.filter_by(device_id=device_id).order_by(Test.created_at.desc()).all()
 
     def get_latest_overall(self, device_id: int) -> str:
-        """Return 'pass', 'fail', or 'none' based on the latest test per type."""
+        """Calcula o status geral do device com base no teste mais recente de cada tipo.
+
+        Retorna:
+          'pass' — todos os tipos disponíveis passaram
+          'fail' — ao menos um tipo falhou ou retornou erro
+          'none' — nenhum teste registrado para o device
+        """
         types = ("lan", "wlan", "boot", "usb", "hotspot")
         statuses = []
         for test_type in types:
@@ -83,7 +133,10 @@ class Database:
         return "pass" if all(s == "pass" for s in statuses) else "fail"
 
     def get_latest_tests(self, device_id: int) -> dict:
-        """Return the most recent result for each test type."""
+        """Retorna o teste mais recente de cada tipo para um device.
+
+        Retorna dict: { '<tipo>': Test, ... } — apenas tipos com registro existente.
+        """
         latest = {}
         for test_type in ("lan", "wlan", "boot", "usb", "hotspot"):
             test = (

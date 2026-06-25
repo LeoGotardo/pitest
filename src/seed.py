@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
-"""Seed the database with fake devices and test results."""
+"""
+seed.py — popula o banco com dados de teste para visualização da UI
+====================================================================
+Apaga e recria todas as tabelas, então insere 3 devices com 3 rodadas
+de testes cada (spread nas últimas 24h), totalizando 45 registros Test.
+
+Os templates de resultado cobrem cenários de pass e fail para todos
+os tipos de teste (lan, wlan, boot, usb, hotspot), permitindo verificar
+a renderização dos badges, filtros e paginação na interface.
+
+Uso:
+  python3 seed.py           (a partir do diretório src/)
+  ../venv/bin/python seed.py
+"""
 
 import random
 from datetime import datetime, timedelta
 from app import app
 from database import db, Device, Test
 
+# devices fictícios com MACs no range da Raspberry Pi Foundation (dc:a6:32, e4:5f:01)
 DEVICES = [
     {"mac_address": "dc:a6:32:11:22:33", "device_id": "rpi-sala"},
     {"mac_address": "dc:a6:32:44:55:66", "device_id": "rpi-cozinha"},
     {"mac_address": "e4:5f:01:ab:cd:ef", "device_id": "rpi-escritorio"},
 ]
 
+# três variantes (pass/fail/pass) por tipo — rotacionadas entre devices e rodadas
 TEST_TEMPLATES = {
     "lan": [
         ("pass",  "LAN OK — 192.168.1.101/24 — ping 8.8.8.8 OK",  {"interface": {"name": "eth0", "present": True, "up": True, "ipv4": "192.168.1.101/24"}, "ping": {"host": "8.8.8.8", "reachable": True, "packet_loss_pct": 0, "rtt_avg_ms": 4.2}}),
@@ -40,7 +55,14 @@ TEST_TEMPLATES = {
     ],
 }
 
-ELAPSED = {"lan": (0.8, 2.5), "wlan": (1.2, 3.1), "boot": (0.3, 0.9), "usb": (0.4, 1.1), "hotspot": (15.0, 280.0)}
+# faixas realistas de tempo de execução por tipo de teste (segundos)
+ELAPSED = {
+    "lan":     (0.8,  2.5),
+    "wlan":    (1.2,  3.1),
+    "boot":    (0.3,  0.9),
+    "usb":     (0.4,  1.1),
+    "hotspot": (15.0, 280.0),
+}
 
 
 def seed():
@@ -55,26 +77,27 @@ def seed():
             db.session.add(device)
             db.session.flush()
 
-            # 3 rounds of tests per device, spread over last 24h
+            # 3 rodadas por device, distribuídas nas últimas 24h (0h, 8h e 16h atrás)
             for round_idx in range(3):
                 ts = now - timedelta(hours=24 - round_idx * 8, minutes=random.randint(0, 30))
-                variant = (i + round_idx) % 3
+                variant = (i + round_idx) % 3  # rotaciona entre as 3 variantes
 
                 for test_type, templates in TEST_TEMPLATES.items():
                     status, message, details = templates[variant]
                     lo, hi = ELAPSED[test_type]
                     test = Test(
-                        device_id = device.id,
-                        type      = test_type,
-                        status    = status,
-                        message   = message,
-                        details   = details,
-                        elapsed_s = round(random.uniform(lo, hi), 2),
+                        device_id  = device.id,
+                        type       = test_type,
+                        status     = status,
+                        message    = message,
+                        details    = details,
+                        elapsed_s  = round(random.uniform(lo, hi), 2),
                         created_at = ts,
                         updated_at = ts,
                     )
                     db.session.add(test)
                     db.session.commit()
+
         print(f"Seeded {len(DEVICES)} devices × 3 rounds × 5 test types = {len(DEVICES) * 3 * 5} test records.")
 
 
