@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+
+{% block breadcrumb %}
+  <span class="nav-sep">/</span>
+  <a class="nav-link" href="/">Devices</a>
+  <span class="nav-sep">/</span>
+  <span class="nav-link" id="nav-hostname">Device #{{ device_id }}</span>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 id="page-title">Device #{{ device_id }}</h1>
+  <p id="page-mac"></p>
+</div>
+
+<!-- Latest tests -->
+<div class="section">
+  <div class="section-title">Latest Results</div>
+  <div class="test-grid" id="test-grid">
+    <div style="color:var(--muted)">Loading...</div>
+  </div>
+</div>
+
+<!-- History -->
+<div class="section">
+  <div class="section-title">History</div>
+
+  <div class="filter-bar" id="filter-bar">
+    <button class="filter-btn active" data-type="all">All</button>
+    <button class="filter-btn" data-type="lan">LAN</button>
+    <button class="filter-btn" data-type="wlan">WLAN</button>
+    <button class="filter-btn" data-type="boot">Boot</button>
+    <button class="filter-btn" data-type="usb">USB</button>
+    <button class="filter-btn" data-type="hotspot">Hotspot</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Status</th>
+          <th>Message</th>
+          <th>Elapsed</th>
+          <th>Date</th>
+        </tr>
+      </thead>
+      <tbody id="history-body">
+        <tr class="state-row"><td colspan="5">Loading...</td></tr>
+      </tbody>
+    </table>
+    <div class="pagination" id="pagination" style="display:none">
+      <span id="pagination-info"></span>
+      <div class="pagination-controls" id="pagination-controls"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const DEVICE_ID = {{ device_id }};
+const ICONS = { pass: "✓", fail: "✗", error: "!" };
+const TEST_TYPES = ["lan", "wlan", "boot", "usb", "hotspot"];
+
+let currentType = "all";
+let currentPage = 1;
+const PER_PAGE  = 10;
+
+// ── Latest tests ─────────────────────────────────────────────────────────────
+fetch(`/api/devices/${DEVICE_ID}/tests`)
+  .then(r => { if (!r.ok) throw new Error("Device not found"); return r.json(); })
+  .then(data => {
+    const d = data.device;
+    document.getElementById("page-title").textContent   = d.device_id || `Device #${d.id}`;
+    document.getElementById("page-mac").textContent     = d.mac_address;
+    document.getElementById("nav-hostname").textContent = d.device_id || `Device #${d.id}`;
+
+    const grid = document.getElementById("test-grid");
+    grid.innerHTML = TEST_TYPES.map(type => {
+      const t = data.latest_tests[type];
+      if (!t) return `
+        <div class="test-card none">
+          <div class="test-card-type">${type}</div>
+          <div class="test-card-status">—</div>
+          <div class="test-card-msg">No data</div>
+        </div>`;
+      return `
+        <div class="test-card ${t.status}">
+          <div class="test-card-type">${type}</div>
+          <div class="test-card-status">${ICONS[t.status] || t.status}</div>
+          <div class="test-card-msg">${t.message || ""}</div>
+          <div class="test-card-time">
+            ${new Date(t.created_at).toLocaleString()}
+            ${t.elapsed_s != null ? `· ${t.elapsed_s}s` : ""}
+          </div>
+        </div>`;
+    }).join("");
+  })
+  .catch(err => {
+    document.getElementById("test-grid").textContent = err.message;
+  });
+
+// ── History ───────────────────────────────────────────────────────────────────
+function loadHistory(type, page) {
+  const body = document.getElementById("history-body");
+  body.innerHTML = '<tr class="state-row"><td colspan="5">Loading...</td></tr>';
+
+  const params = new URLSearchParams({ page, per_page: PER_PAGE });
+  if (type !== "all") params.set("type", type);
+
+  fetch(`/api/devices/${DEVICE_ID}/history?${params}`)
+    .then(r => r.json())
+    .then(data => {
+      if (!data.tests.length) {
+        body.innerHTML = '<tr class="state-row"><td colspan="5">No results.</td></tr>';
+        document.getElementById("pagination").style.display = "none";
+        return;
+      }
+
+      body.innerHTML = data.tests.map(t => `
+        <tr>
+          <td><span class="type-pill">${t.type}</span></td>
+          <td><span class="badge ${t.status}">${t.status}</span></td>
+          <td style="max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.message || "—"}</td>
+          <td style="color:var(--muted)">${t.elapsed_s != null ? t.elapsed_s + "s" : "—"}</td>
+          <td style="color:var(--muted);white-space:nowrap">${new Date(t.created_at).toLocaleString()}</td>
+        </tr>
+      `).join("");
+
+      renderPagination(data.pagination);
+    })
+    .catch(() => {
+      body.innerHTML = '<tr class="state-row"><td colspan="5" style="color:var(--fail)">Failed to load history.</td></tr>';
+    });
+}
+
+function renderPagination(p) {
+  const wrap = document.getElementById("pagination");
+  const info = document.getElementById("pagination-info");
+  const ctrl = document.getElementById("pagination-controls");
+
+  const from = (p.page - 1) * p.per_page + 1;
+  const to   = Math.min(p.page * p.per_page, p.total);
+  info.textContent = `${from}–${to} of ${p.total}`;
+
+  // show at most 5 page buttons centred around current
+  const range = [];
+  const delta = 2;
+  for (let i = Math.max(1, p.page - delta); i <= Math.min(p.pages, p.page + delta); i++) {
+    range.push(i);
+  }
+
+  let html = `<button class="page-btn" ${p.page === 1 ? "disabled" : ""} onclick="go(${p.page - 1})">‹</button>`;
+  if (range[0] > 1) html += `<button class="page-btn" onclick="go(1)">1</button>${range[0] > 2 ? '<span style="color:var(--muted);padding:0 .2rem">…</span>' : ""}`;
+  range.forEach(n => {
+    html += `<button class="page-btn ${n === p.page ? "active" : ""}" onclick="go(${n})">${n}</button>`;
+  });
+  if (range[range.length - 1] < p.pages) {
+    html += `${range[range.length - 1] < p.pages - 1 ? '<span style="color:var(--muted);padding:0 .2rem">…</span>' : ""}<button class="page-btn" onclick="go(${p.pages})">${p.pages}</button>`;
+  }
+  html += `<button class="page-btn" ${p.page === p.pages ? "disabled" : ""} onclick="go(${p.page + 1})">›</button>`;
+
+  ctrl.innerHTML = html;
+  wrap.style.display = "flex";
+}
+
+function go(page) {
+  currentPage = page;
+  loadHistory(currentType, currentPage);
+}
+
+// filter buttons
+document.getElementById("filter-bar").addEventListener("click", e => {
+  const btn = e.target.closest(".filter-btn");
+  if (!btn) return;
+  document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  currentType = btn.dataset.type;
+  currentPage = 1;
+  loadHistory(currentType, currentPage);
+});
+
+loadHistory(currentType, currentPage);
+</script>
+{% endblock %}

@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Devices</h1>
+  <p id="device-count">Loading...</p>
+</div>
+
+<div style="margin-bottom:1rem">
+  <input
+    id="search"
+    type="text"
+    placeholder="Search by MAC address..."
+    style="
+      width:100%;max-width:360px;
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      color:var(--text);
+      padding:.5rem .85rem;
+      font-size:.85rem;
+      outline:none;
+    "
+  >
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>MAC Address</th>
+        <th>Last Result</th>
+        <th>Last Seen</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="devices-body">
+      <tr class="state-row"><td colspan="4">Loading...</td></tr>
+    </tbody>
+  </table>
+  <div class="pagination" id="pagination" style="display:none">
+    <span id="pagination-info"></span>
+    <div class="pagination-controls" id="pagination-controls"></div>
+  </div>
+</div>
+
+<script>
+let currentPage = 1;
+let currentMac  = "";
+const PER_PAGE  = 15;
+let searchTimer = null;
+
+function loadDevices(mac, page) {
+  const body = document.getElementById("devices-body");
+  body.innerHTML = '<tr class="state-row"><td colspan="4">Loading...</td></tr>';
+
+  const params = new URLSearchParams({ page, per_page: PER_PAGE });
+  if (mac) params.set("mac", mac);
+
+  fetch(`/api/devices?${params}`)
+    .then(r => r.json())
+    .then(data => {
+      if (!data.devices.length) {
+        body.innerHTML = '<tr class="state-row"><td colspan="4">No devices found.</td></tr>';
+        document.getElementById("pagination").style.display = "none";
+        return;
+      }
+
+      body.innerHTML = data.devices.map(d => `
+        <tr style="cursor:pointer" onclick="location.href='/rasp/${d.id}'">
+          <td><code>${d.mac_address}</code></td>
+          <td>${d.overall !== "none" ? `<span class="badge ${d.overall}">${d.overall}</span>` : `<span style="color:var(--muted)">—</span>`}</td>
+          <td style="color:var(--muted)">${new Date(d.updated_at).toLocaleString()}</td>
+          <td style="text-align:right"><a href="/rasp/${d.id}" style="font-size:.8rem">View →</a></td>
+        </tr>
+      `).join("");
+
+      document.getElementById("device-count").textContent = `${data.pagination.total} device(s)`;
+      renderPagination(data.pagination);
+    })
+    .catch(() => {
+      body.innerHTML = '<tr class="state-row"><td colspan="4" style="color:var(--fail)">Failed to load devices.</td></tr>';
+    });
+}
+
+function renderPagination(p) {
+  const wrap = document.getElementById("pagination");
+  const info = document.getElementById("pagination-info");
+  const ctrl = document.getElementById("pagination-controls");
+
+  if (p.pages <= 1) { wrap.style.display = "none"; return; }
+
+  const from = (p.page - 1) * p.per_page + 1;
+  const to   = Math.min(p.page * p.per_page, p.total);
+  info.textContent = `${from}–${to} of ${p.total}`;
+
+  const delta = 2;
+  const range = [];
+  for (let i = Math.max(1, p.page - delta); i <= Math.min(p.pages, p.page + delta); i++) range.push(i);
+
+  let html = `<button class="page-btn" ${p.page === 1 ? "disabled" : ""} onclick="go(${p.page - 1})">‹</button>`;
+  if (range[0] > 1) html += `<button class="page-btn" onclick="go(1)">1</button>${range[0] > 2 ? '<span style="color:var(--muted);padding:0 .2rem">…</span>' : ""}`;
+  range.forEach(n => { html += `<button class="page-btn ${n === p.page ? "active" : ""}" onclick="go(${n})">${n}</button>`; });
+  if (range[range.length - 1] < p.pages) {
+    html += `${range[range.length - 1] < p.pages - 1 ? '<span style="color:var(--muted);padding:0 .2rem">…</span>' : ""}<button class="page-btn" onclick="go(${p.pages})">${p.pages}</button>`;
+  }
+  html += `<button class="page-btn" ${p.page === p.pages ? "disabled" : ""} onclick="go(${p.page + 1})">›</button>`;
+
+  ctrl.innerHTML = html;
+  wrap.style.display = "flex";
+}
+
+function go(page) {
+  currentPage = page;
+  loadDevices(currentMac, currentPage);
+}
+
+document.getElementById("search").addEventListener("input", e => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    currentMac  = e.target.value.trim();
+    currentPage = 1;
+    loadDevices(currentMac, currentPage);
+  }, 1000);
+});
+
+loadDevices(currentMac, currentPage);
+</script>
+{% endblock %}
