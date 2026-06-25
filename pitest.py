@@ -1,7 +1,30 @@
 #!/usr/bin/env python3
 """
 pitest.py — Raspberry Pi hardware diagnostics
-Tests: LAN, WLAN, USB, Boot — sends results to external API
+==============================================
+Executa cinco baterias de testes no hardware da RPi e envia os resultados
+em JSON para uma API externa via HTTP POST.
+
+Testes executados (nessa ordem):
+  lan     — interface Ethernet, IP, ping externo
+  wlan    — interface Wi-Fi, SSID, sinal, ping externo
+  boot    — partição /boot, tempo de boot, units systemd com falha
+  usb     — dispositivos USB conectados via lsusb + sysfs
+  hotspot — cria um AP Wi-Fi e aguarda um cliente conectar (executa por último
+             pois toma controle exclusivo da interface wlan)
+
+Uso:
+  sudo python3 pitest.py           # executa e envia para a API
+  sudo python3 pitest.py --json    # também imprime o payload JSON no terminal
+
+Exit code:
+  0 — todos os testes passaram
+  1 — ao menos um teste falhou ou retornou erro
+
+Dependências:
+  pip install requests
+  Ferramentas do sistema: ip, ping, iwconfig/iw, lsusb, findmnt,
+                          systemctl, systemd-analyze, nmcli
 """
 
 import json
@@ -21,22 +44,27 @@ except ImportError:
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 
-API_URL     = "https://your-api.example.com/api/pitest"  # <-- change
-API_TOKEN   = ""          # Bearer token, empty = no auth
-DEVICE_ID   = socket.gethostname()
-PING_HOST   = "8.8.8.8"
-PING_COUNT  = 4
-TIMEOUT_S   = 10
+API_URL     = "https://your-api.example.com/api/pitest"  # endpoint que recebe o POST
+API_TOKEN   = ""                    # Bearer token para autenticação; vazio = sem auth
+DEVICE_ID   = socket.gethostname() # identificador do dispositivo enviado no payload
+PING_HOST   = "8.8.8.8"            # host usado nos testes de conectividade
+PING_COUNT  = 4                     # número de pacotes ICMP por teste de ping
+TIMEOUT_S   = 10                    # timeout em segundos para o POST à API
 
-HOTSPOT_SSID     = "PiTest"
-HOTSPOT_PASSWORD = "pitest123"
-HOTSPOT_TIMEOUT  = 300        # seconds to wait for a client to connect
-HOTSPOT_CON_NAME = "pitest-hotspot"
+HOTSPOT_SSID     = "PiTest"         # SSID do AP criado no teste de hotspot
+HOTSPOT_PASSWORD = "pitest123"      # senha WPA2 do AP
+HOTSPOT_TIMEOUT  = 300              # segundos aguardando um cliente conectar
+HOTSPOT_CON_NAME = "pitest-hotspot" # nome da conexão nmcli (removida após o teste)
 
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def run(cmd: list[str], timeout: int = 10) -> tuple[int, str, str]:
+    """Executa um subprocesso e retorna (returncode, stdout, stderr).
+
+    Retorna (-1, "", mensagem) em caso de timeout ou comando não encontrado,
+    evitando que exceções interrompam o fluxo dos testes.
+    """
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout.strip(), r.stderr.strip()
@@ -47,6 +75,11 @@ def run(cmd: list[str], timeout: int = 10) -> tuple[int, str, str]:
 
 
 def ping(host: str, count: int = PING_COUNT) -> dict:
+    """Envia `count` pacotes ICMP para `host` e retorna métricas de latência.
+
+    Retorna dict com chaves: host, reachable, packet_loss_pct,
+    rtt_min_ms, rtt_avg_ms, rtt_max_ms (as três últimas apenas se reachable).
+    """
     code, out, _ = run(["ping", "-c", str(count), "-W", "2", host], timeout=count * 3 + 5)
     result = {"host": host, "reachable": code == 0}
     if code == 0:
@@ -62,7 +95,10 @@ def ping(host: str, count: int = PING_COUNT) -> dict:
 
 
 def iface_info(iface: str) -> dict:
-    """Return IP, MAC, state for a network interface."""
+    """Retorna estado, IPv4 e MAC de uma interface de rede via `ip addr show`.
+
+    Chaves retornadas: name, present, up, ipv4, mac.
+    """
     info: dict = {"name": iface}
 
     code, out, _ = run(["ip", "addr", "show", iface])
@@ -85,6 +121,14 @@ def iface_info(iface: str) -> dict:
 # ─── LAN ──────────────────────────────────────────────────────────────────────
 
 def test_lan() -> dict:
+    """Testa a interface Ethernet (eth*).
+
+    Critérios de aprovação (em ordem):
+      1. Interface presente no sistema
+      2. Interface com estado UP
+      3. Endereço IPv4 atribuído
+      4. PING_HOST alcançável
+    """
     result: dict = {"status": "fail", "details": {}}
 
     iface = _find_iface("eth")
@@ -118,6 +162,16 @@ def test_lan() -> dict:
 # ─── WLAN ─────────────────────────────────────────────────────────────────────
 
 def test_wlan() -> dict:
+    """Testa a interface Wi-Fi (wlan*).
+
+    Além dos critérios do LAN, coleta SSID e força do sinal via
+    iwconfig (fallback para iw se iwconfig não estiver disponível).
+
+    Critérios de aprovação:
+      1. Interface presente e UP
+      2. Endereço IPv4 atribuído (associação + DHCP bem-sucedidos)
+      3. PING_HOST alcançável
+    """
     result: dict = {"status": "fail", "details": {}}
 
     iface = _find_iface("wlan")
@@ -132,7 +186,7 @@ def test_wlan() -> dict:
         result["message"] = f"Interface {iface} is down"
         return result
 
-    # SSID / signal
+    # tenta iwconfig primeiro; fallback para iw
     code, out, _ = run(["iwconfig", iface])
     if code == 0:
         m = re.search(r'ESSID:"([^"]+)"', out)
@@ -144,7 +198,6 @@ def test_wlan() -> dict:
         m = re.search(r"Bit Rate=([\d.]+\s*\S+)", out)
         details["bit_rate"] = m.group(1).strip() if m else None
     else:
-        # try iw
         code2, out2, _ = run(["iw", "dev", iface, "link"])
         if code2 == 0:
             m = re.search(r"SSID: (.+)", out2)
@@ -172,41 +225,48 @@ def test_wlan() -> dict:
 # ─── BOOT ─────────────────────────────────────────────────────────────────────
 
 def test_boot() -> dict:
+    """Verifica a integridade do processo de boot.
+
+    Coleta:
+      - Uptime atual (uptime -p)
+      - Timestamp do último boot (who -b)
+      - Tempo de boot do systemd (systemd-analyze)
+      - Estado de montagem de /boot (findmnt)
+      - Units systemd com falha (systemctl list-units --state=failed)
+      - Versão do kernel e nome do SO
+
+    Critérios de aprovação:
+      - /boot montado
+      - Nenhuma unit crítica com falha (network, ssh, boot, init)
+    """
     result: dict = {"status": "fail", "details": {}}
 
-    # uptime
     code, out, _ = run(["uptime", "-p"])
     result["details"]["uptime"] = out if code == 0 else None
 
-    # last boot
     code, out, _ = run(["who", "-b"])
     if code == 0:
         m = re.search(r"system boot\s+(.+)", out)
         result["details"]["last_boot"] = m.group(1).strip() if m else out.strip()
 
-    # systemd-analyze
     code, out, _ = run(["systemd-analyze"], timeout=15)
     if code == 0:
         m = re.search(r"Startup finished in (.+)", out)
         result["details"]["boot_time"] = m.group(1).strip() if m else out.strip()
 
-    # /boot partition
     code, out, _ = run(["findmnt", "--target", "/boot", "-o", "SOURCE,FSTYPE,SIZE,USED,AVAIL", "-n"])
     result["details"]["boot_partition"] = {
         "mounted": code == 0,
         "info": out if code == 0 else None,
     }
 
-    # critical failed units
     code, out, _ = run(["systemctl", "list-units", "--state=failed", "--no-legend"])
     failed_units = [ln.split()[0] for ln in out.splitlines() if ln.strip()] if out else []
     result["details"]["failed_units"] = failed_units
 
-    # kernel / os
     result["details"]["kernel"] = platform.release()
     result["details"]["os"] = _read_os_release()
 
-    # /boot partition must be mounted, no failed critical units
     critical = [u for u in failed_units if any(k in u for k in ("network", "ssh", "boot", "init"))]
     if not result["details"]["boot_partition"]["mounted"]:
         result["message"] = "/boot not mounted"
@@ -223,6 +283,7 @@ def test_boot() -> dict:
 
 
 def _read_os_release() -> str:
+    """Lê PRETTY_NAME de /etc/os-release; fallback para platform.system()."""
     try:
         with open("/etc/os-release") as f:
             for line in f:
@@ -236,9 +297,19 @@ def _read_os_release() -> str:
 # ─── USB ──────────────────────────────────────────────────────────────────────
 
 def test_usb() -> dict:
+    """Enumera dispositivos USB via lsusb e sysfs.
+
+    Sempre passa (status='pass') — o objetivo é inventariar o que está
+    conectado, não bloquear o fluxo por ausência de periféricos.
+
+    details inclui:
+      devices       — lista completa de dispositivos (bus, device, id, description)
+      device_count  — total de entradas lsusb
+      non_hub_count — dispositivos excluindo root hubs Linux Foundation
+      ports         — topologia física lida de /sys/bus/usb/devices
+    """
     result: dict = {"status": "fail", "details": {"devices": [], "ports": {}}}
 
-    # lsusb
     code, out, _ = run(["lsusb"])
     devices = []
     if code == 0:
@@ -253,14 +324,11 @@ def test_usb() -> dict:
                 })
     result["details"]["devices"] = devices
 
-    # filter out root hubs (they're always present)
     non_hub = [d for d in devices if "Linux Foundation" not in d["description"]]
     result["details"]["device_count"] = len(devices)
     result["details"]["non_hub_count"] = len(non_hub)
 
-    # physical USB port enumeration via sysfs
-    ports = _usb_ports_from_sysfs()
-    result["details"]["ports"] = ports
+    result["details"]["ports"] = _usb_ports_from_sysfs()
 
     result["status"] = "pass"
     result["message"] = (
@@ -272,13 +340,18 @@ def test_usb() -> dict:
 
 
 def _usb_ports_from_sysfs() -> dict:
-    """Read USB port topology from sysfs."""
+    """Lê topologia USB de /sys/bus/usb/devices.
+
+    Retorna dict keyed pelo nome da entrada (ex: '1-1', 'usb2').
+    Nós de interface (contêm ':') são ignorados.
+    Atributos coletados por porta: idVendor, idProduct, manufacturer,
+    product, speed.
+    """
     ports: dict = {}
     usb_path = "/sys/bus/usb/devices"
     if not os.path.isdir(usb_path):
         return ports
     for entry in sorted(os.listdir(usb_path)):
-        # top-level ports: usb1, usb2, 1-1, 2-1 etc — skip iface nodes (contain ":")
         if ":" in entry:
             continue
         dev_path = os.path.join(usb_path, entry)
@@ -296,6 +369,19 @@ def _usb_ports_from_sysfs() -> dict:
 # ─── HOTSPOT ─────────────────────────────────────────────────────────────────
 
 def test_hotspot() -> dict:
+    """Cria um AP Wi-Fi e aguarda um cliente se conectar.
+
+    Fluxo:
+      1. Cria hotspot via `nmcli device wifi hotspot` (desconecta automaticamente
+         qualquer rede Wi-Fi associada na interface)
+      2. Polling a cada 2s via `iw dev <iface> station dump`
+      3. Ao detectar a primeira estação associada → status='pass'
+      4. Se HOTSPOT_TIMEOUT for atingido sem cliente → status='fail'
+      5. Sempre remove a conexão nmcli ao final (bloco finally)
+
+    Executa por último pois assume controle exclusivo da interface wlan.
+    Requer: nmcli, iw, execução com sudo.
+    """
     result: dict = {"status": "fail", "details": {}}
     iface = _find_iface("wlan")
 
@@ -305,7 +391,6 @@ def test_hotspot() -> dict:
         "timeout_s":  HOTSPOT_TIMEOUT,
     })
 
-    # nmcli creates the hotspot; wlan0 may still be associated — nmcli handles disconnect
     code, out, err = run(
         [
             "nmcli", "device", "wifi", "hotspot",
@@ -328,6 +413,7 @@ def test_hotspot() -> dict:
     try:
         client_mac = _wait_for_station(iface, HOTSPOT_TIMEOUT)
     finally:
+        # garante remoção do hotspot independente do resultado
         run(["nmcli", "connection", "down",   HOTSPOT_CON_NAME], timeout=10)
         run(["nmcli", "connection", "delete", HOTSPOT_CON_NAME], timeout=10)
 
@@ -342,6 +428,11 @@ def test_hotspot() -> dict:
 
 
 def _wait_for_station(iface: str, timeout: int) -> str | None:
+    """Aguarda até `timeout` segundos por uma estação Wi-Fi associada.
+
+    Faz polling via `iw dev <iface> station dump` a cada 2 segundos.
+    Retorna o MAC do primeiro cliente detectado, ou None se expirar.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         code, out, _ = run(["iw", "dev", iface, "station", "dump"], timeout=5)
@@ -355,7 +446,10 @@ def _wait_for_station(iface: str, timeout: int) -> str | None:
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 def _find_iface(prefix: str) -> str:
-    """Return first interface matching prefix, or prefix + '0'."""
+    """Retorna o nome da primeira interface em /sys/class/net que inicia com `prefix`.
+
+    Fallback para '<prefix>0' se nenhuma for encontrada.
+    """
     try:
         for name in os.listdir("/sys/class/net"):
             if name.startswith(prefix):
@@ -366,7 +460,11 @@ def _find_iface(prefix: str) -> str:
 
 
 def get_device_mac() -> str | None:
-    """Return MAC of eth0 → wlan0 → first non-loopback iface, via sysfs."""
+    """Retorna o MAC address da RPi lido diretamente do sysfs.
+
+    Ordem de preferência: eth* → wlan* → primeira interface não-loopback.
+    Ignora endereços nulos (00:00:00:00:00:00).
+    """
     net_path = "/sys/class/net"
     preferred = [_find_iface("eth"), _find_iface("wlan")]
     try:
@@ -390,6 +488,14 @@ def get_device_mac() -> str | None:
 # ─── API SEND ─────────────────────────────────────────────────────────────────
 
 def send_results(payload: dict) -> dict:
+    """Envia o payload JSON via POST para API_URL.
+
+    Retorna dict com chaves:
+      ok           — True se HTTP 2xx
+      http_status  — código de resposta (quando disponível)
+      response     — primeiros 500 chars do corpo da resposta
+      error        — mensagem de erro em caso de falha de conexão/timeout
+    """
     headers = {"Content-Type": "application/json"}
     if API_TOKEN:
         headers["Authorization"] = f"Bearer {API_TOKEN}"
@@ -412,6 +518,25 @@ def send_results(payload: dict) -> dict:
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    """Ponto de entrada: executa todos os testes e envia os resultados.
+
+    Payload enviado:
+      {
+        "device_id":   "<hostname>",
+        "mac_address": "<MAC>",
+        "timestamp":   "<ISO 8601 UTC>",
+        "overall":     "pass" | "fail",
+        "tests": {
+          "<tipo>": {
+            "status":    "pass" | "fail" | "error",
+            "message":   "<resumo legível>",
+            "details":   { ... },
+            "elapsed_s": <float>
+          },
+          ...
+        }
+      }
+    """
     print(f"[pitest] {DEVICE_ID}  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     tests = {
@@ -419,7 +544,7 @@ def main() -> None:
         "wlan":    test_wlan,
         "boot":    test_boot,
         "usb":     test_usb,
-        "hotspot": test_hotspot,   # must run last — takes the wlan iface
+        "hotspot": test_hotspot,   # deve ser o último — toma controle da interface wlan
     }
 
     results: dict = {}
@@ -459,7 +584,6 @@ def main() -> None:
     else:
         print(f"FAILED — {api_result.get('error') or api_result.get('response')}")
 
-    # also dump JSON to stdout for debugging
     if "--json" in sys.argv:
         print("\n" + json.dumps(payload, indent=2, default=str))
 
