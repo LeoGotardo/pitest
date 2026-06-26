@@ -107,7 +107,7 @@ def api_devices():
                 "id":          d.id,
                 "mac_address": d.mac_address,
                 "device_id":   d.device_id,
-                "updated_at":  d.updated_at.isoformat() if d.updated_at else None,
+                "updated_at":  d.updated_at.isoformat() + "Z" if d.updated_at else None,
                 "overall":     database.get_latest_overall(d.id),
             }
             for d in paginated.items
@@ -152,7 +152,7 @@ def api_device_tests(device_id):
                 "status":     t.status,
                 "message":    t.message,
                 "elapsed_s":  t.elapsed_s,
-                "created_at": t.created_at.isoformat(),
+                "created_at": t.created_at.isoformat() + "Z",
             }
             for t_type, t in latest.items()
         },
@@ -199,8 +199,9 @@ def api_device_history(device_id):
                 "type":       t.type,
                 "status":     t.status,
                 "message":    t.message,
+                "details":    t.details,
                 "elapsed_s":  t.elapsed_s,
-                "created_at": t.created_at.isoformat(),
+                "created_at": t.created_at.isoformat() + "Z",
             }
             for t in paginated.items
         ],

@@ -8,20 +8,45 @@
 {% endblock %}
 
 {% block content %}
+<!-- Modal -->
+<div class="modal-overlay hidden" id="modal-overlay">
+  <div class="modal" role="dialog">
+    <div class="modal-header">
+      <div class="modal-header-left">
+        <span id="modal-type-pill" class="type-pill"></span>
+        <span id="modal-badge" class="badge"></span>
+        <span class="modal-title" id="modal-title"></span>
+      </div>
+      <button class="modal-close" id="modal-close" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-meta" id="modal-meta"></div>
+      <div>
+        <div class="modal-section-label">Message</div>
+        <div class="modal-message" id="modal-message"></div>
+      </div>
+      <div id="modal-details-wrap">
+        <div class="modal-section-label">Details</div>
+        <pre class="modal-json" id="modal-details"></pre>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="page-header">
-  <h1 id="page-title">Device #{{ device_id }}</h1>
-  <p id="page-mac"></p>
+  <div>
+    <h1 id="page-title">Device #{{ device_id }}</h1>
+    <p id="page-mac"></p>
+  </div>
+  <span id="overall-badge"></span>
 </div>
 
-<!-- Latest tests -->
 <div class="section">
   <div class="section-title">Latest Results</div>
   <div class="test-grid" id="test-grid">
-    <div style="color:var(--muted)">Loading...</div>
+    <div style="color:var(--muted);font-size:.82rem">Loading...</div>
   </div>
 </div>
 
-<!-- History -->
 <div class="section">
   <div class="section-title">History</div>
 
@@ -58,14 +83,13 @@
 
 <script>
 const DEVICE_ID = {{ device_id }};
-const ICONS = { pass: "✓", fail: "✗", error: "!" };
+const ICONS     = { pass: "✓", fail: "✗", error: "!" };
 const TEST_TYPES = ["lan", "wlan", "boot", "usb", "hotspot"];
 
 let currentType = "all";
 let currentPage = 1;
 const PER_PAGE  = 10;
 
-// ── Latest tests ─────────────────────────────────────────────────────────────
 fetch(`/api/devices/${DEVICE_ID}/tests`)
   .then(r => { if (!r.ok) throw new Error("Device not found"); return r.json(); })
   .then(data => {
@@ -74,32 +98,42 @@ fetch(`/api/devices/${DEVICE_ID}/tests`)
     document.getElementById("page-mac").textContent     = d.mac_address;
     document.getElementById("nav-hostname").textContent = d.device_id || `Device #${d.id}`;
 
+    const statuses  = TEST_TYPES.map(t => data.latest_tests[t]?.status).filter(Boolean);
+    const overall   = statuses.length === 0 ? null : statuses.every(s => s === "pass") ? "pass" : "fail";
+    const badge     = document.getElementById("overall-badge");
+    if (overall) {
+      badge.className = `overall-badge ${overall}`;
+      badge.textContent = overall === "pass" ? "✓ All pass" : "✗ Failing";
+    }
+
     const grid = document.getElementById("test-grid");
     grid.innerHTML = TEST_TYPES.map(type => {
       const t = data.latest_tests[type];
       if (!t) return `
         <div class="test-card none">
-          <div class="test-card-type">${type}</div>
-          <div class="test-card-status">—</div>
-          <div class="test-card-msg">No data</div>
+          <div class="test-card-header">
+            <span class="test-card-type">${type}</span>
+            <span class="test-card-icon">—</span>
+          </div>
+          <div class="test-card-msg" style="color:var(--muted)">No data yet</div>
         </div>`;
       return `
         <div class="test-card ${t.status}">
-          <div class="test-card-type">${type}</div>
-          <div class="test-card-status">${ICONS[t.status] || t.status}</div>
+          <div class="test-card-header">
+            <span class="test-card-type">${type}</span>
+            <span class="test-card-icon">${ICONS[t.status] || t.status}</span>
+          </div>
           <div class="test-card-msg">${t.message || ""}</div>
           <div class="test-card-time">
-            ${new Date(t.created_at).toLocaleString()}
-            ${t.elapsed_s != null ? `· ${t.elapsed_s}s` : ""}
+            ${new Date(t.created_at).toLocaleString()}${t.elapsed_s != null ? ` · ${t.elapsed_s}s` : ""}
           </div>
         </div>`;
     }).join("");
   })
   .catch(err => {
-    document.getElementById("test-grid").textContent = err.message;
+    document.getElementById("test-grid").innerHTML = `<span style="color:var(--fail);font-size:.82rem">${err.message}</span>`;
   });
 
-// ── History ───────────────────────────────────────────────────────────────────
 function loadHistory(type, page) {
   const body = document.getElementById("history-body");
   body.innerHTML = '<tr class="state-row"><td colspan="5">Loading...</td></tr>';
@@ -117,12 +151,12 @@ function loadHistory(type, page) {
       }
 
       body.innerHTML = data.tests.map(t => `
-        <tr>
+        <tr style="cursor:pointer" onclick='openModal(${JSON.stringify(t).replace(/'/g, "&#39;")})'>
           <td><span class="type-pill">${t.type}</span></td>
           <td><span class="badge ${t.status}">${t.status}</span></td>
-          <td style="max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.message || "—"}</td>
-          <td style="color:var(--muted)">${t.elapsed_s != null ? t.elapsed_s + "s" : "—"}</td>
-          <td style="color:var(--muted);white-space:nowrap">${new Date(t.created_at).toLocaleString()}</td>
+          <td style="max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text2)">${t.message || "—"}</td>
+          <td style="color:var(--muted);font-variant-numeric:tabular-nums">${t.elapsed_s != null ? t.elapsed_s + "s" : "—"}</td>
+          <td style="color:var(--muted);white-space:nowrap;font-size:.78rem">${new Date(t.created_at).toLocaleString()}</td>
         </tr>
       `).join("");
 
@@ -138,24 +172,21 @@ function renderPagination(p) {
   const info = document.getElementById("pagination-info");
   const ctrl = document.getElementById("pagination-controls");
 
+  if (p.pages <= 1) { wrap.style.display = "none"; return; }
+
   const from = (p.page - 1) * p.per_page + 1;
   const to   = Math.min(p.page * p.per_page, p.total);
   info.textContent = `${from}–${to} of ${p.total}`;
 
-  // show at most 5 page buttons centred around current
-  const range = [];
   const delta = 2;
-  for (let i = Math.max(1, p.page - delta); i <= Math.min(p.pages, p.page + delta); i++) {
-    range.push(i);
-  }
+  const range = [];
+  for (let i = Math.max(1, p.page - delta); i <= Math.min(p.pages, p.page + delta); i++) range.push(i);
 
   let html = `<button class="page-btn" ${p.page === 1 ? "disabled" : ""} onclick="go(${p.page - 1})">‹</button>`;
-  if (range[0] > 1) html += `<button class="page-btn" onclick="go(1)">1</button>${range[0] > 2 ? '<span style="color:var(--muted);padding:0 .2rem">…</span>' : ""}`;
-  range.forEach(n => {
-    html += `<button class="page-btn ${n === p.page ? "active" : ""}" onclick="go(${n})">${n}</button>`;
-  });
+  if (range[0] > 1) html += `<button class="page-btn" onclick="go(1)">1</button>${range[0] > 2 ? '<span style="color:var(--muted);padding:0 .25rem">…</span>' : ""}`;
+  range.forEach(n => { html += `<button class="page-btn ${n === p.page ? "active" : ""}" onclick="go(${n})">${n}</button>`; });
   if (range[range.length - 1] < p.pages) {
-    html += `${range[range.length - 1] < p.pages - 1 ? '<span style="color:var(--muted);padding:0 .2rem">…</span>' : ""}<button class="page-btn" onclick="go(${p.pages})">${p.pages}</button>`;
+    html += `${range[range.length - 1] < p.pages - 1 ? '<span style="color:var(--muted);padding:0 .25rem">…</span>' : ""}<button class="page-btn" onclick="go(${p.pages})">${p.pages}</button>`;
   }
   html += `<button class="page-btn" ${p.page === p.pages ? "disabled" : ""} onclick="go(${p.page + 1})">›</button>`;
 
@@ -168,7 +199,6 @@ function go(page) {
   loadHistory(currentType, currentPage);
 }
 
-// filter buttons
 document.getElementById("filter-bar").addEventListener("click", e => {
   const btn = e.target.closest(".filter-btn");
   if (!btn) return;
@@ -180,5 +210,41 @@ document.getElementById("filter-bar").addEventListener("click", e => {
 });
 
 loadHistory(currentType, currentPage);
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+function openModal(t) {
+  document.getElementById("modal-type-pill").textContent  = t.type;
+  document.getElementById("modal-badge").className        = `badge ${t.status}`;
+  document.getElementById("modal-badge").textContent      = t.status;
+  document.getElementById("modal-title").textContent      = `#${t.id}`;
+  document.getElementById("modal-message").textContent    = t.message || "—";
+
+  document.getElementById("modal-meta").innerHTML = `
+    <span><strong>Date</strong> ${new Date(t.created_at).toLocaleString()}</span>
+    ${t.elapsed_s != null ? `<span><strong>Elapsed</strong> ${t.elapsed_s}s</span>` : ""}
+  `;
+
+  const detailsWrap = document.getElementById("modal-details-wrap");
+  if (t.details && Object.keys(t.details).length) {
+    document.getElementById("modal-details").textContent = JSON.stringify(t.details, null, 2);
+    detailsWrap.style.display = "block";
+  } else {
+    detailsWrap.style.display = "none";
+  }
+
+  document.getElementById("modal-overlay").classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+}
+
+function closeModal() {
+  document.getElementById("modal-overlay").classList.add("hidden");
+  document.body.style.overflow = "";
+}
+
+document.getElementById("modal-close").addEventListener("click", closeModal);
+document.getElementById("modal-overlay").addEventListener("click", e => {
+  if (e.target === e.currentTarget) closeModal();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
 </script>
 {% endblock %}

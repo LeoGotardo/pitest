@@ -42,9 +42,11 @@ try:
 except ImportError:
     sys.exit("Missing: pip install requests")
 
+from wifiModule import WifiManager
+
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 
-API_URL     = "https://your-api.example.com/api/pitest"  # endpoint que recebe o POST
+API_URL     = "https://417e-2804-7f4-6243-6d62-dff9-4a6b-50dd-1468.ngrok-free.app/api/pitest"  # endpoint que recebe o POST
 API_TOKEN   = ""                    # Bearer token para autenticação; vazio = sem auth
 DEVICE_ID   = socket.gethostname() # identificador do dispositivo enviado no payload
 PING_HOST   = "8.8.8.8"            # host usado nos testes de conectividade
@@ -162,62 +164,76 @@ def test_lan() -> dict:
 # ─── WLAN ─────────────────────────────────────────────────────────────────────
 
 def test_wlan() -> dict:
-    """Testa a interface Wi-Fi (wlan*).
-
-    Além dos critérios do LAN, coleta SSID e força do sinal via
-    iwconfig (fallback para iw se iwconfig não estiver disponível).
+    """Testa o hardware Wi-Fi sem exigir associação a uma rede.
 
     Critérios de aprovação:
-      1. Interface presente e UP
-      2. Endereço IPv4 atribuído (associação + DHCP bem-sucedidos)
-      3. PING_HOST alcançável
+      1. Interface presente no sistema
+      2. rfkill desbloqueado
+      3. Interface consegue subir (ip link set up)
+      4. Driver responde via iw list (suporta modo AP ou managed)
+
+    Coleta adicionalmente: modos suportados, bandas e SSID/sinal se associada.
     """
     result: dict = {"status": "fail", "details": {}}
 
     iface = _find_iface("wlan")
-    details = iface_info(iface)
-    result["details"]["interface"] = details
+    result["details"]["iface"] = iface
 
-    if not details.get("present"):
+    # 1. interface presente
+    code, out, _ = run(["ip", "link", "show", iface])
+    if code != 0:
         result["message"] = f"Interface {iface} not found"
         return result
+    result["details"]["present"] = True
 
-    if not details.get("up"):
-        result["message"] = f"Interface {iface} is down"
+    # 2. rfkill
+    _, rfkill_out, _ = run(["rfkill", "list"])
+    soft_blocked = "Soft blocked: yes" in rfkill_out
+    hard_blocked = "Hard blocked: yes" in rfkill_out
+    result["details"]["rfkill"] = {
+        "soft_blocked": soft_blocked,
+        "hard_blocked": hard_blocked,
+    }
+    if hard_blocked:
+        result["message"] = "Wi-Fi hard blocked (hardware switch)"
+        return result
+    if soft_blocked:
+        run(["rfkill", "unblock", "wifi"])
+
+    # 3. bring up
+    up_code, _, up_err = run(["ip", "link", "set", iface, "up"])
+    if up_code != 0:
+        result["message"] = f"Cannot bring {iface} up: {up_err}"
+        return result
+    result["details"]["link_up"] = True
+
+    # 4. driver / capabilities via iw list
+    cap_code, cap_out, _ = run(["iw", "list"], timeout=5)
+    if cap_code != 0:
+        result["message"] = "iw list failed — driver not responding"
         return result
 
-    # tenta iwconfig primeiro; fallback para iw
-    code, out, _ = run(["iwconfig", iface])
-    if code == 0:
-        m = re.search(r'ESSID:"([^"]+)"', out)
-        details["ssid"] = m.group(1) if m else None
+    modes = re.findall(r"\*\s+(\S+)", cap_out[cap_out.find("Supported interface modes"):]) if "Supported interface modes" in cap_out else []
+    bands = re.findall(r"Band (\w+):", cap_out)
+    result["details"]["capabilities"] = {
+        "supported_modes": modes,
+        "bands": bands,
+        "ap_supported": "AP" in modes,
+    }
 
-        m = re.search(r"Signal level=(-\d+)", out)
-        details["signal_dbm"] = int(m.group(1)) if m else None
+    # opcional: coleta SSID/sinal se já associada
+    _, iw_out, _ = run(["iw", "dev", iface, "link"])
+    if iw_out and "Not connected" not in iw_out:
+        m = re.search(r"SSID: (.+)", iw_out)
+        if m:
+            result["details"]["ssid"] = m.group(1).strip()
+        m = re.search(r"signal: (-\d+)", iw_out)
+        if m:
+            result["details"]["signal_dbm"] = int(m.group(1))
 
-        m = re.search(r"Bit Rate=([\d.]+\s*\S+)", out)
-        details["bit_rate"] = m.group(1).strip() if m else None
-    else:
-        code2, out2, _ = run(["iw", "dev", iface, "link"])
-        if code2 == 0:
-            m = re.search(r"SSID: (.+)", out2)
-            details["ssid"] = m.group(1).strip() if m else None
-            m = re.search(r"signal: (-\d+)", out2)
-            details["signal_dbm"] = int(m.group(1)) if m else None
-
-    if not details.get("ipv4"):
-        result["message"] = "No IPv4 address — not associated or DHCP failed"
-        return result
-
-    ping_result = ping(PING_HOST)
-    result["details"]["ping"] = ping_result
-
-    if ping_result["reachable"]:
-        result["status"] = "pass"
-        ssid = details.get("ssid", "?")
-        result["message"] = f"WLAN OK — SSID: {ssid} — {details['ipv4']} — ping OK"
-    else:
-        result["message"] = "WLAN connected, IP assigned, but gateway unreachable"
+    result["status"] = "pass"
+    modes_str = ", ".join(modes) if modes else "unknown"
+    result["message"] = f"WLAN OK — {iface} up — modes: {modes_str}"
 
     return result
 
@@ -294,21 +310,26 @@ def _read_os_release() -> str:
     return platform.system()
 
 
+# IDs de dispositivos USB internos da RPi (não são portas físicas externas)
+_USB_INTERNAL_IDS = {
+    "1d6b:0001", "1d6b:0002", "1d6b:0003",  # Linux Foundation root hubs
+    "0424:9514",                               # SMSC SMC9514 hub+ethernet combo
+    "0424:ec00",                               # SMSC9512/9514 Ethernet adapter
+    "0424:7800",                               # SMSC LAN7800 (RPi 3B+)
+    "0bda:8153",                               # Realtek RTL8153 (RPi 4)
+}
+
 # ─── USB ──────────────────────────────────────────────────────────────────────
 
 def test_usb() -> dict:
-    """Enumera dispositivos USB via lsusb e sysfs.
+    """Enumera dispositivos USB externos nas portas físicas da RPi.
 
-    Sempre passa (status='pass') — o objetivo é inventariar o que está
-    conectado, não bloquear o fluxo por ausência de periféricos.
+    Filtra dispositivos internos conhecidos (root hubs, chip Ethernet/hub
+    SMSC soldado na placa) para reportar apenas periféricos externos.
 
-    details inclui:
-      devices       — lista completa de dispositivos (bus, device, id, description)
-      device_count  — total de entradas lsusb
-      non_hub_count — dispositivos excluindo root hubs Linux Foundation
-      ports         — topologia física lida de /sys/bus/usb/devices
+    Sempre passa — objetivo é inventário, não bloquear por ausência de periféricos.
     """
-    result: dict = {"status": "fail", "details": {"devices": [], "ports": {}}}
+    result: dict = {"status": "fail", "details": {"devices": [], "external_devices": []}}
 
     code, out, _ = run(["lsusb"])
     devices = []
@@ -317,24 +338,20 @@ def test_usb() -> dict:
             m = re.match(r"Bus (\d+) Device (\d+): ID ([0-9a-f:]+) (.+)", line)
             if m:
                 devices.append({
-                    "bus": int(m.group(1)),
-                    "device": int(m.group(2)),
-                    "id": m.group(3),
+                    "bus":         int(m.group(1)),
+                    "device":      int(m.group(2)),
+                    "id":          m.group(3),
                     "description": m.group(4).strip(),
                 })
+
+    external = [d for d in devices if d["id"] not in _USB_INTERNAL_IDS]
+
     result["details"]["devices"] = devices
-
-    non_hub = [d for d in devices if "Linux Foundation" not in d["description"]]
-    result["details"]["device_count"] = len(devices)
-    result["details"]["non_hub_count"] = len(non_hub)
-
+    result["details"]["external_devices"] = external
     result["details"]["ports"] = _usb_ports_from_sysfs()
 
     result["status"] = "pass"
-    result["message"] = (
-        f"USB OK — {len(non_hub)} device(s) connected "
-        f"({len(devices)} total incl. hubs)"
-    )
+    result["message"] = f"USB OK — {len(external)} external device(s) connected"
 
     return result
 
@@ -369,78 +386,51 @@ def _usb_ports_from_sysfs() -> dict:
 # ─── HOTSPOT ─────────────────────────────────────────────────────────────────
 
 def test_hotspot() -> dict:
-    """Cria um AP Wi-Fi e aguarda um cliente se conectar.
+    """Cria um AP Wi-Fi via hostapd/dnsmasq e aguarda um cliente se conectar.
 
-    Fluxo:
-      1. Cria hotspot via `nmcli device wifi hotspot` (desconecta automaticamente
-         qualquer rede Wi-Fi associada na interface)
-      2. Polling a cada 2s via `iw dev <iface> station dump`
-      3. Ao detectar a primeira estação associada → status='pass'
-      4. Se HOTSPOT_TIMEOUT for atingido sem cliente → status='fail'
-      5. Sempre remove a conexão nmcli ao final (bloco finally)
+    Usa WifiManager (wifiModule.py) que:
+      - desbloqueia rfkill
+      - para NetworkManager/wpa_supplicant
+      - configura hostapd + dnsmasq
+      - polling via iw station dump
 
     Executa por último pois assume controle exclusivo da interface wlan.
-    Requer: nmcli, iw, execução com sudo.
+    Requer: hostapd, dnsmasq, iw, execução com sudo.
     """
     result: dict = {"status": "fail", "details": {}}
-    iface = _find_iface("wlan")
+
+    wifi = WifiManager(ssid=HOTSPOT_SSID, password=HOTSPOT_PASSWORD)
 
     result["details"].update({
-        "iface":      iface,
-        "ssid":       HOTSPOT_SSID,
-        "timeout_s":  HOTSPOT_TIMEOUT,
+        "iface":     wifi.interface,
+        "ssid":      HOTSPOT_SSID,
+        "timeout_s": HOTSPOT_TIMEOUT,
     })
 
-    code, out, err = run(
-        [
-            "nmcli", "device", "wifi", "hotspot",
-            "ifname",   iface,
-            "ssid",     HOTSPOT_SSID,
-            "password", HOTSPOT_PASSWORD,
-            "con-name", HOTSPOT_CON_NAME,
-        ],
-        timeout=20,
-    )
-
-    if code != 0:
-        result["message"] = f"Failed to start hotspot: {(err or out).splitlines()[0]}"
+    try:
+        wifi.startHotspot()
+    except RuntimeError as exc:
+        result["message"] = f"Failed to start hotspot: {exc}"
         return result
 
     result["details"]["hotspot_up"] = True
-    print(f"\n    Hotspot '{HOTSPOT_SSID}' up on {iface}. Waiting up to {HOTSPOT_TIMEOUT}s for a client...",
+    print(f"\n    Hotspot '{HOTSPOT_SSID}' up on {wifi.interface}. Waiting up to {HOTSPOT_TIMEOUT}s for a client...",
           flush=True)
 
     try:
-        client_mac = _wait_for_station(iface, HOTSPOT_TIMEOUT)
+        station = wifi.wait_for_station(HOTSPOT_TIMEOUT)
     finally:
-        # garante remoção do hotspot independente do resultado
-        run(["nmcli", "connection", "down",   HOTSPOT_CON_NAME], timeout=10)
-        run(["nmcli", "connection", "delete", HOTSPOT_CON_NAME], timeout=10)
+        wifi.stopHotspot()
 
-    if client_mac:
+    if station:
         result["status"] = "pass"
-        result["details"]["client_mac"] = client_mac
-        result["message"] = f"Hotspot OK — client {client_mac} connected"
+        result["details"]["station"] = station
+        signal = f" — signal {station['signal_dbm']} dBm" if "signal_dbm" in station else ""
+        result["message"] = f"Hotspot OK — client {station['mac']} connected{signal}"
     else:
         result["message"] = f"Timeout: no client connected within {HOTSPOT_TIMEOUT}s"
 
     return result
-
-
-def _wait_for_station(iface: str, timeout: int) -> str | None:
-    """Aguarda até `timeout` segundos por uma estação Wi-Fi associada.
-
-    Faz polling via `iw dev <iface> station dump` a cada 2 segundos.
-    Retorna o MAC do primeiro cliente detectado, ou None se expirar.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        code, out, _ = run(["iw", "dev", iface, "station", "dump"], timeout=5)
-        if code == 0 and "Station" in out:
-            m = re.search(r"Station ([0-9a-f:]{17})", out)
-            return m.group(1) if m else "unknown"
-        time.sleep(2)
-    return None
 
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────

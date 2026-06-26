@@ -1,0 +1,16 @@
+[Unit]
+Description=Raspberry Pi Hardware Diagnostics
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/pi/test/venv/bin/python3 /home/pi/test/pitest.py
+WorkingDirectory=/home/pi/test
+User=root
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
