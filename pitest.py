@@ -49,7 +49,7 @@ load_dotenv()
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 
-API_URL     = ""  # endpoint que recebe o POST
+API_URL     = "https://pitest-seven.vercel.app/api/pitest"  # endpoint que recebe o POST
 API_TOKEN   = os.environ.get('PITEST_API_TOKEN', '')                    # Bearer token para autenticação; vazio = sem auth
 DEVICE_ID   = socket.gethostname() # identificador do dispositivo enviado no payload
 PING_HOST   = "8.8.8.8"            # host usado nos testes de conectividade
