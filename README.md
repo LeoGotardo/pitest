@@ -9,6 +9,8 @@ Ferramenta de diagnóstico de hardware para Raspberry Pi. Executa uma bateria de
 ```
 pitest/
 ├── pitest.py          # script de testes — roda na RPi
+├── wifiModule.py      # WifiManager — gerencia hostapd/dnsmasq para o teste de hotspot
+├── pitest.service     # unit systemd para executar pitest.py no boot
 ├── requirements.txt   # dependências do script (requests)
 └── src/               # servidor web
     ├── app.py         # Flask + rotas da API
@@ -30,10 +32,12 @@ pitest/
 | Teste | O que verifica |
 |---|---|
 | **LAN** | Interface `eth*` presente, UP, IP atribuído, ping externo |
-| **WLAN** | Interface `wlan*`, associação, SSID, sinal dBm, IP, ping externo |
-| **Boot** | Partição `/boot` montada, tempo de boot via `systemd-analyze`, units com falha |
-| **USB** | Dispositivos conectados via `lsusb` + topologia de portas via sysfs |
-| **Hotspot** | Cria um AP Wi-Fi e aguarda um cliente conectar (executa por último) |
+| **WLAN** | Interface `wlan*` presente, rfkill desbloqueado, interface sobe, driver responde via `iw list`; coleta SSID/sinal se já associada |
+| **Boot** | Partição `/boot` montada, tempo de boot via `systemd-analyze`, units com falha, uptime, versão do kernel e SO |
+| **USB** | Dispositivos externos via `lsusb` + topologia de portas via sysfs (filtra hub/Ethernet internos da placa) |
+| **Hotspot** | Cria um AP Wi-Fi (hostapd + dnsmasq) e aguarda um cliente conectar (executa por último) |
+
+> O teste WLAN verifica o hardware Wi-Fi sem exigir associação a uma rede. Passa se a interface existe, não está bloqueada por rfkill, consegue subir e o driver responde via `iw list`.
 
 ---
 
@@ -43,11 +47,16 @@ Edite as constantes no topo do arquivo:
 
 ```python
 API_URL          = "https://seu-servidor.com/api/pitest"
-API_TOKEN        = ""           # Bearer token; vazio = sem autenticação
+API_TOKEN        = ""                    # Bearer token; vazio = sem autenticação
+DEVICE_ID        = socket.gethostname() # identificador enviado no payload
 PING_HOST        = "8.8.8.8"
+PING_COUNT       = 4                    # pacotes ICMP por teste de ping
+TIMEOUT_S        = 10                   # timeout do POST à API (segundos)
+
 HOTSPOT_SSID     = "PiTest"
 HOTSPOT_PASSWORD = "pitest123"
-HOTSPOT_TIMEOUT  = 300         # segundos aguardando cliente no hotspot
+HOTSPOT_TIMEOUT  = 300                  # segundos aguardando cliente no hotspot
+HOTSPOT_CON_NAME = "pitest-hotspot"    # nome da conexão nmcli (removida após o teste)
 ```
 
 ---
@@ -62,11 +71,33 @@ sudo python3 pitest.py           # executa e envia para a API
 sudo python3 pitest.py --json    # também imprime o payload no terminal
 ```
 
-> Requer `sudo` para acessar interfaces de rede e criar o hotspot via `nmcli`.
+> Requer `sudo` para acessar interfaces de rede e criar o hotspot.
 >
-> Ferramentas necessárias no sistema: `ip`, `ping`, `iwconfig` (ou `iw`), `lsusb`, `findmnt`, `systemctl`, `systemd-analyze`, `nmcli`.
+> Ferramentas necessárias no sistema: `ip`, `ping`, `iw`, `rfkill`, `lsusb`, `findmnt`, `systemctl`, `systemd-analyze`, `hostapd`, `dnsmasq`.
 
 **Exit code:** `0` se todos os testes passaram, `1` se algum falhou — útil para integração com scripts e cron.
+
+### Primeira execução do hotspot
+
+Na primeira vez, instale as dependências do AP:
+
+```python
+from wifiModule import WifiManager
+WifiManager().prepare_environment()   # instala hostapd e dnsmasq via apt
+```
+
+### Execução automática via systemd
+
+```bash
+sudo cp pitest.service /etc/systemd/system/
+# edite o caminho em ExecStart/WorkingDirectory se necessário
+sudo systemctl daemon-reload
+sudo systemctl enable pitest.service   # roda no próximo boot
+sudo systemctl start pitest.service    # roda agora
+sudo journalctl -u pitest.service      # ver logs
+```
+
+O arquivo `pitest.service` executa `pitest.py` como `oneshot` após a rede estar disponível (`network-online.target`).
 
 ### Servidor web
 
