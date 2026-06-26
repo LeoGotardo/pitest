@@ -37,8 +37,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+_default_db = (
+    "sqlite:////tmp/pitest.db"
+    if os.environ.get("VERCEL")
+    else "sqlite:///pitest.db"
+)
+
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///pitest.db"
+app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", _default_db)
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
