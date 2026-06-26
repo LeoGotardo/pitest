@@ -457,3 +457,93 @@ tr[style*="cursor:pointer"]:hover td { background: var(--surface3); }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+/* ── nav logout ── */
+.nav-logout { margin-left: auto; font-size: 0.78rem; color: var(--muted); transition: color .15s; }
+.nav-logout:hover { color: var(--fail); text-decoration: none; }
+
+/* ── login page ── */
+.login-body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+.login-wrap  { width: 100%; max-width: 380px; padding: 1.5rem; }
+
+.login-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 2.25rem 2rem 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  box-shadow: 0 24px 64px rgba(0,0,0,.5);
+}
+
+.login-brand {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  text-align: center;
+}
+.login-brand span { color: var(--accent); }
+
+.login-subtitle {
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-bottom: 1.25rem;
+}
+
+.login-error {
+  background: var(--fail-bg);
+  border: 1px solid var(--fail-bd);
+  color: var(--fail);
+  border-radius: var(--radius);
+  padding: 0.65rem 0.9rem;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin-bottom: 0.5rem;
+}
+
+.login-form { display: flex; flex-direction: column; gap: 1rem; margin-top: 0.25rem; }
+
+.login-field { display: flex; flex-direction: column; gap: 0.4rem; }
+.login-field label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text2);
+  letter-spacing: 0.03em;
+}
+.login-field input {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 0.6rem 0.85rem;
+  font-size: 0.9rem;
+  font-family: inherit;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+.login-field input::placeholder { color: var(--muted); }
+.login-field input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(96,165,250,.12);
+}
+.login-field input:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.login-btn {
+  margin-top: 0.25rem;
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.65rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: opacity .15s;
+  width: 100%;
+}
+.login-btn:hover:not(:disabled) { opacity: 0.88; }
+.login-btn:disabled { opacity: 0.4; cursor: not-allowed; }

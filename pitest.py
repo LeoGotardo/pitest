@@ -43,11 +43,14 @@ except ImportError:
     sys.exit("Missing: pip install requests")
 
 from wifiModule import WifiManager
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 
-API_URL     = "https://417e-2804-7f4-6243-6d62-dff9-4a6b-50dd-1468.ngrok-free.app/api/pitest"  # endpoint que recebe o POST
-API_TOKEN   = ""                    # Bearer token para autenticação; vazio = sem auth
+API_URL     = ""  # endpoint que recebe o POST
+API_TOKEN   = os.environ.get('PITEST_API_TOKEN', '')                    # Bearer token para autenticação; vazio = sem auth
 DEVICE_ID   = socket.gethostname() # identificador do dispositivo enviado no payload
 PING_HOST   = "8.8.8.8"            # host usado nos testes de conectividade
 PING_COUNT  = 4                     # número de pacotes ICMP por teste de ping

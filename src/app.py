@@ -5,25 +5,44 @@ Serve as páginas HTML e expõe a API REST consumida pelo pitest.py e pelos
 templates front-end.
 
 Rotas HTML:
+  GET  /login                     — página de login
+  POST /login                     — autenticação
+  GET  /logout                    — encerra sessão
   GET  /                          — lista de devices (index.html)
   GET  /rasp/<device_id>          — detalhes e histórico de um device (rasp.html)
 
 Rotas API:
-  POST /api/pitest                          — recebe payload do pitest.py
+  POST /api/pitest                          — recebe payload do pitest.py (Bearer se PITEST_API_TOKEN configurado)
   GET  /api/devices                         — lista devices (paginado, filtro por MAC)
   GET  /api/devices/<id>/tests              — último resultado por tipo de teste
   GET  /api/devices/<id>/history            — histórico paginado com filtro por tipo
 
 Banco de dados:
   SQLite em instance/pitest.db (criado automaticamente na primeira execução).
+
+Variáveis de ambiente:
+  SECRET_KEY       — chave para assinar cookies de sessão (obrigatória em produção)
+  PITEST_USER      — login (default: admin)
+  PITEST_PASSWORD  — senha (obrigatória)
+  PITEST_API_TOKEN — Bearer token para acesso à API (opcional; se vazio, /api/pitest fica aberto)
 """
 
-from flask import Flask, jsonify, request, render_template
+import functools
+import os
+import time
+
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 from database import db, Database, Test
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///pitest.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-in-prod")
 
 db.init_app(app)
 database = Database()
@@ -31,15 +50,129 @@ database = Database()
 with app.app_context():
     db.create_all()
 
+_LOGIN_USER = os.environ.get("PITEST_USER", "admin")
+_LOGIN_PASS = os.environ.get("PITEST_PASSWORD", "")
+_API_TOKEN  = os.environ.get("PITEST_API_TOKEN", "")
+
+# ─── BRUTE FORCE ──────────────────────────────────────────────────────────────
+
+_MAX_ATTEMPTS = 5
+_LOCKOUT_S    = 15 * 60  # 15 minutes
+_attempts: dict[str, dict] = {}  # ip -> {count, locked_until}
+
+
+def _get_ip() -> str:
+    return request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+
+
+def _check_lockout(ip: str) -> tuple[bool, int]:
+    rec = _attempts.get(ip)
+    if not rec:
+        return False, 0
+    remaining = int(rec["locked_until"] - time.time())
+    if remaining > 0:
+        return True, remaining
+    return False, 0
+
+
+def _record_failure(ip: str) -> int:
+    rec = _attempts.setdefault(ip, {"count": 0, "locked_until": 0.0})
+    rec["count"] += 1
+    if rec["count"] >= _MAX_ATTEMPTS:
+        rec["locked_until"] = time.time() + _LOCKOUT_S
+        rec["count"] = 0
+        return 0
+    return _MAX_ATTEMPTS - rec["count"]
+
+
+def _reset_attempts(ip: str) -> None:
+    _attempts.pop(ip, None)
+
+
+# ─── AUTH ─────────────────────────────────────────────────────────────────────
+
+def _bearer_token() -> str | None:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    return None
+
+
+def _bearer_valid() -> bool:
+    token = _bearer_token()
+    return bool(_API_TOKEN and token == _API_TOKEN)
+
+
+def login_required(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        if session.get("logged_in") or _bearer_valid():
+            return f(*args, **kwargs)
+        if request.path.startswith("/api/"):
+            return jsonify({"status": "error", "message": "unauthorized"}), 401
+        return redirect(url_for("login", next=request.path))
+    return wrapper
+
+
+def _safe_next(next_url: str | None) -> str:
+    if next_url and next_url.startswith("/") and not next_url.startswith("//"):
+        return next_url
+    return url_for("index")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if session.get("logged_in"):
+        return redirect(url_for("index"))
+
+    error = None
+    locked_for = None
+
+    if request.method == "POST":
+        ip = _get_ip()
+        is_locked, secs = _check_lockout(ip)
+
+        if is_locked:
+            mins = (secs + 59) // 60
+            error = f"Muitas tentativas. Tente novamente em {mins} minuto(s)."
+            locked_for = secs
+        else:
+            username = request.form.get("username", "").strip()
+            password = request.form.get("password", "")
+
+            if username == _LOGIN_USER and password == _LOGIN_PASS and _LOGIN_PASS:
+                _reset_attempts(ip)
+                session["logged_in"] = True
+                session.permanent = False
+                return redirect(_safe_next(request.form.get("next")))
+            else:
+                remaining = _record_failure(ip)
+                if remaining == 0:
+                    mins = _LOCKOUT_S // 60
+                    error = f"Conta bloqueada por {mins} minutos após muitas tentativas."
+                else:
+                    error = f"Usuário ou senha incorretos. {remaining} tentativa(s) restante(s)."
+
+    return render_template("login.html", error=error, locked_for=locked_for,
+                           next=request.args.get("next", ""))
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
 
 # ─── HTML ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
+@login_required
 def index():
     return render_template("index.html")
 
 
 @app.route("/rasp/<int:device_id>")
+@login_required
 def rasp(device_id):
     return render_template("rasp.html", device_id=device_id)
 
@@ -49,6 +182,8 @@ def rasp(device_id):
 @app.route("/api/pitest", methods=["POST"])
 def pitest():
     """Recebe e persiste o resultado de uma bateria de testes do pitest.py.
+
+    Se PITEST_API_TOKEN estiver configurado, exige Authorization: Bearer <token>.
 
     Body esperado (JSON):
       {
@@ -62,8 +197,11 @@ def pitest():
         }
       }
 
-    Retorna 201 em sucesso, 400 para payload inválido, 500 para erro interno.
+    Retorna 201 em sucesso, 400 para payload inválido, 401 para token inválido, 500 para erro interno.
     """
+    if _API_TOKEN and not _bearer_valid():
+        return jsonify({"status": "error", "message": "unauthorized"}), 401
+
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"status": "error", "message": "invalid JSON"}), 400
@@ -77,6 +215,7 @@ def pitest():
 
 
 @app.route("/api/devices")
+@login_required
 def api_devices():
     """Lista devices com paginação e filtro parcial por MAC address.
 
@@ -122,6 +261,7 @@ def api_devices():
 
 
 @app.route("/api/devices/<int:device_id>/tests")
+@login_required
 def api_device_tests(device_id):
     """Retorna o resultado mais recente de cada tipo de teste para um device.
 
@@ -160,6 +300,7 @@ def api_device_tests(device_id):
 
 
 @app.route("/api/devices/<int:device_id>/history")
+@login_required
 def api_device_history(device_id):
     """Retorna o histórico paginado de testes de um device com filtro por tipo.
 
