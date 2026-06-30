@@ -1,3 +1,3 @@
 {
-  "rewrites": [{ "source": "/(.*)", "statusCode": 404, "destination": "/" }]
+  "rewrites": [{ "source": "/(.*)", "destination": "/" }]
 }

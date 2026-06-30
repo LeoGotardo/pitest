@@ -181,6 +181,14 @@ def rasp(device_id):
     return render_template("rasp.html", device_id=device_id)
 
 
+@app.errorhandler(404)
+def not_found(_e):
+    """Rotas inexistentes: páginas voltam para a home; /api/* devolve JSON 404."""
+    if request.path.startswith("/api/"):
+        return jsonify({"status": "error", "message": "not found"}), 404
+    return redirect(url_for("index"))
+
+
 # ─── API ──────────────────────────────────────────────────────────────────────
 
 @app.route("/api/pitest", methods=["POST"])
