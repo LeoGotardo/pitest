@@ -4,3 +4,5 @@ instance/
 __pycache__/
 Images/
 .env
+.vercel
+.env*.local

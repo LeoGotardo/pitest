@@ -37,15 +37,36 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_default_db = (
-    "sqlite:////tmp/pitest.db"
-    if os.environ.get("VERCEL")
-    else "sqlite:///pitest.db"
-)
+def _resolve_db_uri() -> str:
+    """Resolve a URI do banco a partir das envs, com fallback para SQLite.
+
+    Aceita tanto o DATABASE_URL clássico quanto o conjunto da integração Neon
+    no Vercel (que neste projeto usa prefixo DB_, ex.: DB_DATABASE_URL). Usa a
+    primeira env não-vazia na ordem de preferência e normaliza o esquema
+    postgres:// → postgresql:// exigido pelo SQLAlchemy. Sem nenhuma env de
+    Postgres, cai para SQLite local (efêmero no Vercel — /tmp).
+    """
+    for key in (
+        "DATABASE_URL",                 # var clássica / .env local
+        "DB_DATABASE_URL",              # integração Neon (pooled) — prefixo DB_
+        "DB_POSTGRES_URL",
+        "POSTGRES_URL",                 # integração sem prefixo
+        "DB_DATABASE_URL_UNPOOLED",     # conexões diretas (não-pooled)
+        "DB_POSTGRES_URL_NON_POOLING",
+    ):
+        url = os.environ.get(key, "").strip()
+        if url:
+            if url.startswith("postgres://"):
+                url = "postgresql://" + url[len("postgres://"):]
+            return url
+    return "sqlite:////tmp/pitest.db" if os.environ.get("VERCEL") else "sqlite:///pitest.db"
+
 
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", _default_db)
+app.config["SQLALCHEMY_DATABASE_URI"] = _resolve_db_uri()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+# Neon encerra conexões ociosas; pre_ping evita usar uma conexão morta.
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-in-prod")
