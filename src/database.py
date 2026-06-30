@@ -53,7 +53,7 @@ class Test(db.Model):
     id         = db.Column(db.Integer, primary_key=True)
     type       = db.Column(db.String(32), nullable=False)
     status     = db.Column(db.String(32), nullable=False)
-    message    = db.Column(db.String(256), nullable=True)
+    message    = db.Column(db.Text, nullable=True)  # TEXT: o agente envia mensagens longas (Postgres rejeita VARCHAR estourado)
     details    = db.Column(db.JSON, nullable=True)
     elapsed_s  = db.Column(db.Float, nullable=True)
     device_id  = db.Column(db.Integer, db.ForeignKey("device.id"), nullable=False)
