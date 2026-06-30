@@ -55,6 +55,7 @@ function loadDevices(mac, page) {
       if (!data.devices.length) {
         body.innerHTML = '<tr class="state-row"><td colspan="5">No devices found.</td></tr>';
         document.getElementById("pagination").style.display = "none";
+        document.getElementById("device-count").textContent = `0 device(s)`;
         return;
       }
 
@@ -69,7 +70,7 @@ function loadDevices(mac, page) {
           <td style="text-align:right"><a href="/rasp/${d.id}" style="font-size:.78rem;color:var(--text2)">View →</a></td>
         </tr>
       `).join("");
-
+      
       document.getElementById("device-count").textContent = `${data.pagination.total} device(s)`;
       renderPagination(data.pagination);
     })
