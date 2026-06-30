@@ -28,9 +28,15 @@ class Device(db.Model):
     id          = db.Column(db.Integer, primary_key=True)
     mac_address = db.Column(db.String(32), nullable=False, unique=True)
     device_id   = db.Column(db.String(64), nullable=True)
+    name        = db.Column(db.String(64), nullable=True)  # apelido definido no site (sobrepõe o hostname na UI)
     created_at  = db.Column(db.DateTime, nullable=False, default=db.func.now())
     updated_at  = db.Column(db.DateTime, nullable=False, default=db.func.now(), onupdate=db.func.now())
     tests       = db.relationship("Test", backref="device", lazy=True, order_by="Test.created_at.desc()")
+
+    @property
+    def display_name(self) -> str | None:
+        """Nome exibido na UI: o apelido (name) se definido, senão o hostname."""
+        return self.name or self.device_id
 
 
 class Test(db.Model):
@@ -97,6 +103,56 @@ class Database:
             db.session.rollback()
             return e
 
+    def set_device_name(self, device_id: int, name: str | None) -> Exception | None:
+        """Define (ou limpa) o apelido de um device exibido na UI.
+
+        `name` vazio/None limpa o apelido — a UI volta a mostrar o hostname.
+        Retorna None em sucesso, ou a Exception em caso de erro (com rollback).
+        """
+        try:
+            device = Device.query.get(device_id)
+            if not device:
+                return ValueError("device not found")
+            device.name = (name or "").strip() or None
+            db.session.commit()
+            return None
+        except Exception as e:
+            db.session.rollback()
+            return e
+
+    def record_screen_test(self, device_id: int, status: str, note: str | None = None) -> Exception | None:
+        """Registra o resultado manual do teste de tela informado pelo usuário no site.
+
+        Cria um Test do tipo 'screen' (append-only, como os demais). `status` deve
+        ser 'pass' ou 'fail'; `note` é uma observação opcional do operador.
+
+        Retorna None em sucesso, ou a Exception em caso de erro (com rollback).
+        """
+        try:
+            device = Device.query.get(device_id)
+            if not device:
+                return ValueError("device not found")
+
+            note = (note or "").strip()
+            message = "Tela OK" if status == "pass" else "Tela com problema"
+            if note:
+                message = f"{message} — {note}"
+
+            test = Test(
+                device_id = device_id,
+                type      = "screen",
+                status    = status,
+                message   = message[:256],
+                details   = {"note": note, "manual": True},
+                elapsed_s = None,
+            )
+            db.session.add(test)
+            db.session.commit()
+            return None
+        except Exception as e:
+            db.session.rollback()
+            return e
+
     def get_all_devices(self) -> list[Device]:
         """Retorna todos os devices ordenados pelo mais recentemente atualizado."""
         return Device.query.order_by(Device.updated_at.desc()).all()
@@ -117,13 +173,13 @@ class Database:
           'fail' — ao menos um tipo falhou ou retornou erro
           'none' — nenhum teste registrado para o device
         """
-        types = ("lan", "wlan", "boot", "usb", "hotspot")
+        types = ("lan", "wlan", "boot", "usb", "hotspot", "screen")
         statuses = []
         for test_type in types:
             t = (
                 Test.query
                 .filter_by(device_id=device_id, type=test_type)
-                .order_by(Test.created_at.desc())
+                .order_by(Test.created_at.desc(), Test.id.desc())
                 .first()
             )
             if t:
@@ -138,11 +194,11 @@ class Database:
         Retorna dict: { '<tipo>': Test, ... } — apenas tipos com registro existente.
         """
         latest = {}
-        for test_type in ("lan", "wlan", "boot", "usb", "hotspot"):
+        for test_type in ("lan", "wlan", "boot", "usb", "hotspot", "screen"):
             test = (
                 Test.query
                 .filter_by(device_id=device_id, type=test_type)
-                .order_by(Test.created_at.desc())
+                .order_by(Test.created_at.desc(), Test.id.desc())
                 .first()
             )
             if test:

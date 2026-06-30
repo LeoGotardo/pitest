@@ -19,7 +19,7 @@
   <table>
     <thead>
       <tr>
-        <th>Hostname</th>
+        <th>Name</th>
         <th>MAC Address</th>
         <th>Last Result</th>
         <th>Last Seen</th>
@@ -60,7 +60,7 @@ function loadDevices(mac, page) {
 
       body.innerHTML = data.devices.map(d => `
         <tr style="cursor:pointer" onclick="location.href='/rasp/${d.id}'">
-          <td style="font-weight:500">${d.device_id || '—'}</td>
+          <td style="font-weight:500">${d.display_name || '—'}${d.name && d.device_id && d.name !== d.device_id ? `<span style="display:block;font-weight:400;font-size:.72rem;color:var(--muted)">${d.device_id}</span>` : ''}</td>
           <td><code>${d.mac_address}</code></td>
           <td>${d.overall && d.overall !== "none"
             ? `<span class="badge ${d.overall}">${d.overall}</span>`

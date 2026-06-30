@@ -34,6 +34,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -44,6 +45,11 @@ except ImportError:
 
 from wifiModule import WifiManager
 from dotenv import load_dotenv
+
+try:
+    import screenTest
+except Exception:
+    screenTest = None
 
 load_dotenv()
 
@@ -508,26 +514,52 @@ def send_results(payload: dict) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# ─── PROGRESS ───────────────────────────────────────────────────────────────
 
-def main() -> None:
-    """Ponto de entrada: executa todos os testes e envia os resultados.
+# Ordem dos testes — hotspot por último (toma controle exclusivo da wlan).
+TEST_ORDER = ("lan", "wlan", "boot", "usb", "hotspot")
 
-    Payload enviado:
+
+class Progress:
+    """Estado compartilhado do progresso dos diagnósticos.
+
+    A thread de diagnósticos chama start()/finish(); o loop do screen_test lê
+    line() p/ desenhar o overlay. Protegido por lock por ser lido de outra thread.
+    """
+
+    def __init__(self, names: tuple[str, ...] = TEST_ORDER):
+        self._names  = names
+        self._status = {n: "·" for n in names}   # · pendente · … rodando · ✓/✗ feito
+        self._lock   = threading.Lock()
+
+    def start(self, name: str) -> None:
+        with self._lock:
+            self._status[name] = "…"
+
+    def finish(self, name: str, status: str) -> None:
+        with self._lock:
+            self._status[name] = "✓" if status == "pass" else "✗"
+
+    def line(self) -> str:
+        with self._lock:
+            return "  ".join(f"{n.upper()}:{self._status[n]}" for n in self._names)
+
+
+# ─── DIAGNOSTICS ──────────────────────────────────────────────────────────────
+
+def run_diagnostics(progress: "Progress | None" = None) -> tuple[dict, bool]:
+    """Executa a bateria de testes e devolve (payload, overall_pass).
+
+    Pode rodar em thread de fundo (enquanto o screen_test ocupa a tela). Se
+    `progress` for passado, atualiza-o a cada teste p/ alimentar o overlay.
+
+    Payload retornado:
       {
         "device_id":   "<hostname>",
         "mac_address": "<MAC>",
         "timestamp":   "<ISO 8601 UTC>",
         "overall":     "pass" | "fail",
-        "tests": {
-          "<tipo>": {
-            "status":    "pass" | "fail" | "error",
-            "message":   "<resumo legível>",
-            "details":   { ... },
-            "elapsed_s": <float>
-          },
-          ...
-        }
+        "tests": { "<tipo>": {status, message, details, elapsed_s}, ... }
       }
     """
     print(f"[pitest] {DEVICE_ID}  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -544,6 +576,8 @@ def main() -> None:
     overall_pass = True
 
     for name, fn in tests.items():
+        if progress:
+            progress.start(name)
         print(f"  [{name.upper()}] running...", end=" ", flush=True)
         t0 = time.monotonic()
         try:
@@ -553,6 +587,8 @@ def main() -> None:
         elapsed = round(time.monotonic() - t0, 2)
         r["elapsed_s"] = elapsed
         results[name] = r
+        if progress:
+            progress.finish(name, r["status"])
 
         icon = "✓" if r["status"] == "pass" else "✗"
         print(f"{icon}  {r.get('message', r['status'])}  ({elapsed}s)")
@@ -567,7 +603,11 @@ def main() -> None:
         "overall":     "pass" if overall_pass else "fail",
         "tests":       results,
     }
+    return payload, overall_pass
 
+
+def report_and_send(payload: dict, overall_pass: bool) -> None:
+    """Imprime o resumo, envia o payload à API e (com --json) imprime o JSON."""
     print(f"\n  Overall: {'PASS' if overall_pass else 'FAIL'}")
     print(f"\n[pitest] Sending to {API_URL} ...", end=" ", flush=True)
 
@@ -579,6 +619,53 @@ def main() -> None:
 
     if "--json" in sys.argv:
         print("\n" + json.dumps(payload, indent=2, default=str))
+
+
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    """Ponto de entrada.
+
+    Por padrão abre o teste visual de tela (screen_test) em fullscreen enquanto
+    os diagnósticos rodam em uma thread de fundo. Ao terminarem, os resultados
+    são enviados automaticamente, mas a tela CONTINUA rodando — fecha só quando
+    o usuário pressiona ESC/Q. O overlay mostra "[done — ESC to exit]" quando
+    os testes acabam. Use --no-screen p/ rodar só no console (ou quando não há
+    pygame/display, o fallback é automático).
+    """
+    use_screen = screenTest is not None and "--no-screen" not in sys.argv
+
+    if use_screen:
+        progress = Progress()
+        holder: dict = {}
+        done = threading.Event()
+
+        def worker():
+            # Roda os diagnósticos e já envia os resultados, sem fechar a tela.
+            try:
+                payload, ok = run_diagnostics(progress)
+                holder["payload"], holder["ok"] = payload, ok
+                report_and_send(payload, ok)
+            finally:
+                done.set()
+
+        def status() -> str:
+            line = progress.line()
+            return line + "  [done — ESC to exit]" if done.is_set() else line
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        try:
+            # Sem stop_event: a tela roda até o usuário sair (ESC/Q/quit),
+            # mesmo depois de os diagnósticos terminarem.
+            screenTest.run(status_fn=status)
+        except Exception as e:
+            print(f"[pitest] screen test indisponível ({e}); seguindo no console.")
+        t.join()
+        overall_pass = holder.get("ok", False)
+    else:
+        payload, overall_pass = run_diagnostics()
+        report_and_send(payload, overall_pass)
 
     sys.exit(0 if overall_pass else 1)
 

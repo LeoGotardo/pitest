@@ -53,8 +53,23 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-in-prod")
 db.init_app(app)
 database = Database()
 
+def _ensure_schema() -> None:
+    """Migração leve: adiciona colunas novas em DBs já existentes.
+
+    db.create_all() só cria tabelas faltantes, não altera colunas. Garante a
+    coluna `name` (apelido do device) em bancos criados antes dessa feature.
+    """
+    from sqlalchemy import inspect, text
+    insp = inspect(db.engine)
+    cols = [c["name"] for c in insp.get_columns("device")]
+    if "name" not in cols:
+        db.session.execute(text("ALTER TABLE device ADD COLUMN name VARCHAR(64)"))
+        db.session.commit()
+
+
 with app.app_context():
     db.create_all()
+    _ensure_schema()
 
 _LOGIN_USER = os.environ.get("PITEST_USER", "admin")
 _LOGIN_PASS = os.environ.get("PITEST_PASSWORD", "")
@@ -249,11 +264,13 @@ def api_devices():
     return jsonify({
         "devices": [
             {
-                "id":          d.id,
-                "mac_address": d.mac_address,
-                "device_id":   d.device_id,
-                "updated_at":  d.updated_at.isoformat() + "Z" if d.updated_at else None,
-                "overall":     database.get_latest_overall(d.id),
+                "id":           d.id,
+                "mac_address":  d.mac_address,
+                "device_id":    d.device_id,
+                "name":         d.name,
+                "display_name": d.display_name,
+                "updated_at":   d.updated_at.isoformat() + "Z" if d.updated_at else None,
+                "overall":      database.get_latest_overall(d.id),
             }
             for d in paginated.items
         ],
@@ -289,9 +306,11 @@ def api_device_tests(device_id):
     latest = database.get_latest_tests(device_id)
     return jsonify({
         "device": {
-            "id":          device.id,
-            "mac_address": device.mac_address,
-            "device_id":   device.device_id,
+            "id":           device.id,
+            "mac_address":  device.mac_address,
+            "device_id":    device.device_id,
+            "name":         device.name,
+            "display_name": device.display_name,
         },
         "latest_tests": {
             t_type: {
@@ -303,6 +322,63 @@ def api_device_tests(device_id):
             for t_type, t in latest.items()
         },
     })
+
+
+@app.route("/api/devices/<int:device_id>/name", methods=["PUT"])
+@login_required
+def api_set_device_name(device_id):
+    """Define o apelido exibido na UI para um device.
+
+    Body (JSON): { "name": "<apelido>" }. Nome vazio/null limpa o apelido,
+    voltando a exibir o hostname.
+
+    Retorna 200 com o device atualizado, 404 se não existir, 500 em erro.
+    """
+    device = database.get_device(device_id)
+    if not device:
+        return jsonify({"status": "error", "message": "device not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    name = data.get("name")
+
+    error = database.set_device_name(device_id, name)
+    if error:
+        return jsonify({"status": "error", "message": str(error)}), 500
+
+    device = database.get_device(device_id)
+    return jsonify({
+        "status":       "ok",
+        "name":         device.name,
+        "display_name": device.display_name,
+    })
+
+
+@app.route("/api/devices/<int:device_id>/screen-test", methods=["POST"])
+@login_required
+def api_screen_test(device_id):
+    """Registra o resultado manual do teste de tela informado pelo usuário.
+
+    O teste de tela é visual e roda na Raspberry (sem teclado/mouse), então o
+    veredito é dado aqui no site.
+
+    Body (JSON): { "status": "pass" | "fail", "note": "<observação opcional>" }
+
+    Retorna 201 em sucesso, 400 para status inválido, 404 se o device não
+    existir, 500 em erro interno.
+    """
+    device = database.get_device(device_id)
+    if not device:
+        return jsonify({"status": "error", "message": "device not found"}), 404
+
+    data   = request.get_json(silent=True) or {}
+    status = data.get("status")
+    if status not in ("pass", "fail"):
+        return jsonify({"status": "error", "message": "status must be 'pass' or 'fail'"}), 400
+
+    error = database.record_screen_test(device_id, status, data.get("note"))
+    if error:
+        return jsonify({"status": "error", "message": str(error)}), 500
+    return jsonify({"status": "ok"}), 201
 
 
 @app.route("/api/devices/<int:device_id>/history")

@@ -1,15 +1,23 @@
 [Unit]
 Description=Raspberry Pi Hardware Diagnostics
-After=network-online.target
+After=network-online.target getty@tty1.service
 Wants=network-online.target
+# Impede o getty de reivindicar o tty1 e matar o processo com SIGHUP.
+Conflicts=getty@tty1.service
 
 [Service]
 Type=oneshot
-ExecStart=/home/pi/test/venv/bin/python3 /home/pi/test/pitest.py
 WorkingDirectory=/home/pi/test
+ExecStart=/home/pi/test/venv/bin/python3 /home/pi/test/pitest.py
 User=root
+# Renderiza direto no HDMI via KMS/DRM, sem X/desktop.
+Environment=SDL_VIDEODRIVER=kmsdrm
+StandardInput=tty-force
 StandardOutput=journal
 StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVTDisallocate=yes
 RemainAfterExit=no
 
 [Install]

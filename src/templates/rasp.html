@@ -34,8 +34,17 @@
 </div>
 <div class="page-header">
   <div>
-    <h1 id="page-title">Device #{{ device_id }}</h1>
+    <div class="title-row">
+      <h1 id="page-title">Device #{{ device_id }}</h1>
+      <button id="rename-btn" class="rename-btn" title="Rename device" aria-label="Rename device">✎</button>
+    </div>
+    <div id="rename-form" class="rename-form hidden">
+      <input id="rename-input" type="text" maxlength="64" placeholder="Device name (blank = use hostname)">
+      <button id="rename-save" class="page-btn active">Save</button>
+      <button id="rename-cancel" class="page-btn">Cancel</button>
+    </div>
     <p id="page-mac"></p>
+    <p id="page-host"></p>
   </div>
   <span id="overall-badge"></span>
 </div>
@@ -44,6 +53,19 @@
   <div class="section-title">Latest Results</div>
   <div class="test-grid" id="test-grid">
     <div style="color:var(--muted);font-size:.82rem">Loading...</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">Screen Test (manual)</div>
+  <div class="screen-panel">
+    <p class="screen-panel-hint">O teste de tela é visual e roda na Raspberry. Informe aqui se a tela passou e adicione uma observação.</p>
+    <textarea id="screen-note" maxlength="256" rows="2" placeholder="Observação (opcional)"></textarea>
+    <div class="screen-panel-actions">
+      <button class="screen-btn pass" data-status="pass">✓ Passou</button>
+      <button class="screen-btn fail" data-status="fail">✗ Falhou</button>
+      <span id="screen-msg"></span>
+    </div>
   </div>
 </div>
 
@@ -57,6 +79,7 @@
     <button class="filter-btn" data-type="boot">Boot</button>
     <button class="filter-btn" data-type="usb">USB</button>
     <button class="filter-btn" data-type="hotspot">Hotspot</button>
+    <button class="filter-btn" data-type="screen">Screen</button>
   </div>
 
   <div class="table-wrap">
@@ -84,19 +107,31 @@
 <script>
 const DEVICE_ID = {{ device_id }};
 const ICONS     = { pass: "✓", fail: "✗", error: "!" };
-const TEST_TYPES = ["lan", "wlan", "boot", "usb", "hotspot"];
+const TEST_TYPES = ["lan", "wlan", "boot", "usb", "hotspot", "screen"];
 
 let currentType = "all";
 let currentPage = 1;
 const PER_PAGE  = 10;
 
+let deviceData = null;
+
+function applyDevice(d) {
+  deviceData = d;
+  const label = d.display_name || `Device #${d.id}`;
+  document.getElementById("page-title").textContent   = label;
+  document.getElementById("page-mac").textContent     = d.mac_address;
+  document.getElementById("nav-hostname").textContent = label;
+  // Mostra o hostname abaixo só quando um apelido o substitui.
+  const host = document.getElementById("page-host");
+  host.textContent = (d.name && d.device_id && d.name !== d.device_id) ? `hostname: ${d.device_id}` : "";
+}
+
+function loadLatest() {
 fetch(`/api/devices/${DEVICE_ID}/tests`)
   .then(r => { if (!r.ok) throw new Error("Device not found"); return r.json(); })
   .then(data => {
     const d = data.device;
-    document.getElementById("page-title").textContent   = d.device_id || `Device #${d.id}`;
-    document.getElementById("page-mac").textContent     = d.mac_address;
-    document.getElementById("nav-hostname").textContent = d.device_id || `Device #${d.id}`;
+    applyDevice(d);
 
     const statuses  = TEST_TYPES.map(t => data.latest_tests[t]?.status).filter(Boolean);
     const overall   = statuses.length === 0 ? null : statuses.every(s => s === "pass") ? "pass" : "fail";
@@ -133,6 +168,9 @@ fetch(`/api/devices/${DEVICE_ID}/tests`)
   .catch(err => {
     document.getElementById("test-grid").innerHTML = `<span style="color:var(--fail);font-size:.82rem">${err.message}</span>`;
   });
+}
+
+loadLatest();
 
 function loadHistory(type, page) {
   const body = document.getElementById("history-body");
@@ -246,5 +284,73 @@ document.getElementById("modal-overlay").addEventListener("click", e => {
   if (e.target === e.currentTarget) closeModal();
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+
+// ── Rename ──────────────────────────────────────────────────────────────────
+const renameForm   = document.getElementById("rename-form");
+const renameInput  = document.getElementById("rename-input");
+
+function openRename() {
+  renameInput.value = (deviceData && deviceData.name) || "";
+  renameForm.classList.remove("hidden");
+  renameInput.focus();
+  renameInput.select();
+}
+
+function closeRename() {
+  renameForm.classList.add("hidden");
+}
+
+function saveRename() {
+  const name = renameInput.value.trim();
+  fetch(`/api/devices/${DEVICE_ID}/name`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  })
+    .then(r => { if (!r.ok) throw new Error("Failed to rename"); return r.json(); })
+    .then(res => {
+      applyDevice({ ...deviceData, name: res.name, display_name: res.display_name });
+      closeRename();
+    })
+    .catch(err => alert(err.message));
+}
+
+// ── Screen test (manual) ──────────────────────────────────────────────────────
+function submitScreenTest(status) {
+  const note = document.getElementById("screen-note").value.trim();
+  const msg  = document.getElementById("screen-msg");
+  msg.textContent = "Salvando...";
+  msg.style.color = "var(--muted)";
+  document.querySelectorAll(".screen-btn").forEach(b => b.disabled = true);
+
+  fetch(`/api/devices/${DEVICE_ID}/screen-test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, note }),
+  })
+    .then(r => { if (!r.ok) throw new Error("Falha ao salvar"); return r.json(); })
+    .then(() => {
+      msg.textContent = "Salvo ✓";
+      msg.style.color = "var(--pass)";
+      document.getElementById("screen-note").value = "";
+      loadLatest();
+      currentPage = 1;
+      loadHistory(currentType, currentPage);
+    })
+    .catch(err => { msg.textContent = err.message; msg.style.color = "var(--fail)"; })
+    .finally(() => document.querySelectorAll(".screen-btn").forEach(b => b.disabled = false));
+}
+
+document.querySelectorAll(".screen-btn").forEach(btn =>
+  btn.addEventListener("click", () => submitScreenTest(btn.dataset.status))
+);
+
+document.getElementById("rename-btn").addEventListener("click", openRename);
+document.getElementById("rename-cancel").addEventListener("click", closeRename);
+document.getElementById("rename-save").addEventListener("click", saveRename);
+renameInput.addEventListener("keydown", e => {
+  if (e.key === "Enter")  { e.preventDefault(); saveRename(); }
+  if (e.key === "Escape") { e.preventDefault(); closeRename(); }
+});
 </script>
 {% endblock %}
