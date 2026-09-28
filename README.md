@@ -1,6 +1,6 @@
 # PiTest
 
-Ferramenta de diagnóstico de hardware para Raspberry Pi. Executa uma bateria de testes (LAN, WLAN, Boot, USB, Hotspot) e envia os resultados para um servidor web central que exibe o histórico de cada dispositivo.
+Ferramenta de diagnóstico de hardware para Raspberry Pi. Executa uma bateria de testes (LAN, WLAN, Boot, USB, Bluetooth, Hotspot) e envia os resultados para um servidor web central que exibe o histórico de cada dispositivo.
 
 ---
 
@@ -35,6 +35,8 @@ pitest/
 | **WLAN** | Interface `wlan*` presente, rfkill desbloqueado, interface sobe, driver responde via `iw list`; coleta SSID/sinal se já associada |
 | **Boot** | Partição `/boot` montada, tempo de boot via `systemd-analyze`, units com falha, uptime, versão do kernel e SO |
 | **USB** | Dispositivos externos via `lsusb` + topologia de portas via sysfs (filtra hub/Ethernet internos da placa) |
+| **Bluetooth** | Controlador `hci*` presente, rfkill desbloqueado, `bluetooth.service` ativo, controlador liga e aguarda um celular parear/conectar (RPi visível como `PiTest <hostname>`, sem PIN) |
+| **GPIO** (manual) | GPIOs BCM 2–27 piscam durante toda a execução (mín. `GPIO_BLINK_MIN_S`); o operador marca no site quais LEDs acenderam |
 | **Hotspot** | Cria um AP Wi-Fi (hostapd + dnsmasq) e aguarda um cliente conectar (executa por último) |
 
 > O teste WLAN verifica o hardware Wi-Fi sem exigir associação a uma rede. Passa se a interface existe, não está bloqueada por rfkill, consegue subir e o driver responde via `iw list`.
@@ -73,7 +75,7 @@ sudo python3 pitest.py --json    # também imprime o payload no terminal
 
 > Requer `sudo` para acessar interfaces de rede e criar o hotspot.
 >
-> Ferramentas necessárias no sistema: `ip`, `ping`, `iw`, `rfkill`, `lsusb`, `findmnt`, `systemctl`, `systemd-analyze`, `hostapd`, `dnsmasq`.
+> Ferramentas necessárias no sistema: `ip`, `ping`, `iw`, `rfkill`, `lsusb`, `findmnt`, `systemctl`, `systemd-analyze`, `hostapd`, `dnsmasq`, `bluetoothctl` (bluez), `pinctrl` ou `raspi-gpio`.
 
 **Exit code:** `0` se todos os testes passaram, `1` se algum falhou — útil para integração com scripts e cron.
 
@@ -130,6 +132,7 @@ Recebe o resultado de uma bateria de testes enviado pelo `pitest.py`.
     "wlan": { "status": "pass", "message": "...", "details": {}, "elapsed_s": 2.1 },
     "boot": { "status": "pass", "message": "...", "details": {}, "elapsed_s": 0.5 },
     "usb":  { "status": "pass", "message": "...", "details": {}, "elapsed_s": 0.7 },
+    "bluetooth": { "status": "pass", "message": "...", "details": {}, "elapsed_s": 18.4 },
     "hotspot": { "status": "pass", "message": "...", "details": {}, "elapsed_s": 45.3 }
   }
 }
@@ -160,7 +163,7 @@ Histórico paginado de testes com filtro por tipo.
 
 | Param | Tipo | Default | Descrição |
 |---|---|---|---|
-| `type` | string | all | `lan` · `wlan` · `boot` · `usb` · `hotspot` · `all` |
+| `type` | string | all | `lan` · `wlan` · `boot` · `usb` · `bluetooth` · `hotspot` · `screen` · `gpio` · `all` |
 | `page` | int | 1 | Página |
 | `per_page` | int | 10 | Itens por página (máx 100) |
 

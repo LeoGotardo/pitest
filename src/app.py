@@ -372,13 +372,43 @@ def api_screen_test(device_id):
     return jsonify({"status": "ok"}), 201
 
 
+@app.route("/api/devices/<int:device_id>/gpio-test", methods=["POST"])
+@login_required
+def api_gpio_test(device_id):
+    """Registra o resultado manual do teste de GPIO informado pelo usuário.
+
+    Os pinos piscam na Raspberry durante o pitest.py; o operador marca aqui
+    quais LEDs acenderam e quais não.
+
+    Body (JSON): { "lit": [17, 27], "not_lit": [22], "note": "<opcional>" }
+    (números BCM 2–27; ao menos um pino em lit ou not_lit)
+
+    Retorna 201 em sucesso, 400 para pinos inválidos, 404 se o device não
+    existir, 500 em erro interno.
+    """
+    device = database.get_device(device_id)
+    if not device:
+        return jsonify({"status": "error", "message": "device not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    lit, not_lit = data.get("lit", []), data.get("not_lit", [])
+    pins = lit + not_lit if isinstance(lit, list) and isinstance(not_lit, list) else None
+    if not pins or not all(isinstance(p, int) and 2 <= p <= 27 for p in pins) or len(set(pins)) != len(pins):
+        return jsonify({"status": "error", "message": "lit/not_lit must be distinct BCM pins 2-27"}), 400
+
+    error = database.record_gpio_test(device_id, sorted(lit), sorted(not_lit), data.get("note"))
+    if error:
+        return jsonify({"status": "error", "message": str(error)}), 500
+    return jsonify({"status": "ok"}), 201
+
+
 @app.route("/api/devices/<int:device_id>/history")
 @login_required
 def api_device_history(device_id):
     """Retorna o histórico paginado de testes de um device com filtro por tipo.
 
     Query params:
-      type     — tipo de teste (lan/wlan/boot/usb/hotspot/'all'); default 'all'
+      type     — tipo de teste (lan/wlan/boot/usb/bluetooth/hotspot/screen/gpio/'all'); default 'all'
       page     — página (default 1)
       per_page — itens por página, máx 100 (default 10)
 

@@ -194,6 +194,34 @@ nav .container {
 .screen-btn.fail:hover:not(:disabled) { background: var(--fail-bg); border-color: var(--fail-bd); color: var(--fail); }
 #screen-msg { font-size: .8rem; }
 
+/* ── manual gpio test ── */
+.gpio-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: .4rem;
+  margin-bottom: .75rem;
+}
+.gpio-pin {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface2);
+  color: var(--text);
+  cursor: pointer;
+  padding: .4rem .55rem;
+  font-family: inherit;
+  transition: background .15s, border-color .15s;
+}
+.gpio-pin:hover { border-color: var(--border2); }
+.gpio-pin.lit     { background: var(--pass-bg); border-color: var(--pass-bd); color: var(--pass); }
+.gpio-pin.not_lit { background: var(--fail-bg); border-color: var(--fail-bd); color: var(--fail); }
+.gpio-bcm  { font-size: .8rem; font-weight: 600; }
+.gpio-phys { font-size: .7rem; color: var(--text2); }
+#gpio-msg  { font-size: .8rem; }
+
 /* ── section ── */
 .section { margin-bottom: 1.75rem; }
 .section-title {

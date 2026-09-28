@@ -3,7 +3,7 @@ database.py — modelos SQLAlchemy e camada de acesso a dados
 ===========================================================
 Define dois modelos:
   Device — representa uma Raspberry Pi identificada pelo MAC address
-  Test   — representa o resultado de um único teste (lan/wlan/boot/usb/hotspot)
+  Test   — representa o resultado de um único teste (lan/wlan/boot/usb/bluetooth/hotspot)
 
 A classe Database encapsula todas as operações de leitura e escrita,
 mantendo a lógica de negócio fora das rotas Flask.
@@ -43,7 +43,7 @@ class Test(db.Model):
     """Resultado de um teste individual em um Device.
 
     Campos:
-      type      — tipo do teste: lan | wlan | boot | usb | hotspot
+      type      — tipo do teste: lan | wlan | boot | usb | bluetooth | hotspot | screen | gpio
       status    — resultado: pass | fail | error
       message   — resumo legível do resultado
       details   — payload JSON completo com métricas e diagnósticos
@@ -153,6 +153,45 @@ class Database:
             db.session.rollback()
             return e
 
+    def record_gpio_test(self, device_id: int, lit: list[int], not_lit: list[int],
+                         note: str | None = None) -> Exception | None:
+        """Registra o resultado manual do teste de GPIO informado pelo usuário no site.
+
+        Cria um Test do tipo 'gpio'. `lit` são os pinos BCM cujo LED acendeu e
+        `not_lit` os que tinham LED mas não acenderam. Passa se ao menos um pino
+        acendeu e nenhum falhou.
+
+        Retorna None em sucesso, ou a Exception em caso de erro (com rollback).
+        """
+        try:
+            device = Device.query.get(device_id)
+            if not device:
+                return ValueError("device not found")
+
+            note = (note or "").strip()
+            status = "pass" if lit and not not_lit else "fail"
+            if status == "pass":
+                message = f"GPIO OK — {len(lit)} pino(s) acenderam: {', '.join(map(str, lit))}"
+            else:
+                message = f"GPIO com problema — não acenderam: {', '.join(map(str, not_lit)) or '—'}"
+            if note:
+                message = f"{message} — {note}"
+
+            test = Test(
+                device_id = device_id,
+                type      = "gpio",
+                status    = status,
+                message   = message[:256],
+                details   = {"lit": lit, "not_lit": not_lit, "note": note, "manual": True},
+                elapsed_s = None,
+            )
+            db.session.add(test)
+            db.session.commit()
+            return None
+        except Exception as e:
+            db.session.rollback()
+            return e
+
     def get_all_devices(self) -> list[Device]:
         """Retorna todos os devices ordenados pelo mais recentemente atualizado."""
         return Device.query.order_by(Device.updated_at.desc()).all()
@@ -173,7 +212,7 @@ class Database:
           'fail' — ao menos um tipo falhou ou retornou erro
           'none' — nenhum teste registrado para o device
         """
-        types = ("lan", "wlan", "boot", "usb", "hotspot", "screen")
+        types = ("lan", "wlan", "boot", "usb", "bluetooth", "hotspot", "screen", "gpio")
         statuses = []
         for test_type in types:
             t = (
@@ -194,7 +233,7 @@ class Database:
         Retorna dict: { '<tipo>': Test, ... } — apenas tipos com registro existente.
         """
         latest = {}
-        for test_type in ("lan", "wlan", "boot", "usb", "hotspot", "screen"):
+        for test_type in ("lan", "wlan", "boot", "usb", "bluetooth", "hotspot", "screen", "gpio"):
             test = (
                 Test.query
                 .filter_by(device_id=device_id, type=test_type)

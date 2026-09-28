@@ -70,6 +70,19 @@
 </div>
 
 <div class="section">
+  <div class="section-title">GPIO Test (manual)</div>
+  <div class="screen-panel">
+    <p class="screen-panel-hint">Durante o pitest os GPIOs piscam. Clique em cada pino com LED: 1× = acendeu, 2× = não acendeu, 3× = limpa.</p>
+    <div class="gpio-grid" id="gpio-grid"></div>
+    <textarea id="gpio-note" maxlength="256" rows="2" placeholder="Observação (opcional)"></textarea>
+    <div class="screen-panel-actions">
+      <button class="screen-btn" id="gpio-submit" disabled>Salvar</button>
+      <span id="gpio-msg"></span>
+    </div>
+  </div>
+</div>
+
+<div class="section">
   <div class="section-title">History</div>
 
   <div class="filter-bar" id="filter-bar">
@@ -78,8 +91,10 @@
     <button class="filter-btn" data-type="wlan">WLAN</button>
     <button class="filter-btn" data-type="boot">Boot</button>
     <button class="filter-btn" data-type="usb">USB</button>
+    <button class="filter-btn" data-type="bluetooth">Bluetooth</button>
     <button class="filter-btn" data-type="hotspot">Hotspot</button>
     <button class="filter-btn" data-type="screen">Screen</button>
+    <button class="filter-btn" data-type="gpio">GPIO</button>
   </div>
 
   <div class="table-wrap">
@@ -107,7 +122,7 @@
 <script>
 const DEVICE_ID = {{ device_id }};
 const ICONS     = { pass: "✓", fail: "✗", error: "!" };
-const TEST_TYPES = ["lan", "wlan", "boot", "usb", "hotspot", "screen"];
+const TEST_TYPES = ["lan", "wlan", "boot", "usb", "bluetooth", "hotspot", "screen", "gpio"];
 
 let currentType = "all";
 let currentPage = 1;
@@ -321,7 +336,7 @@ function submitScreenTest(status) {
   const msg  = document.getElementById("screen-msg");
   msg.textContent = "Salvando...";
   msg.style.color = "var(--muted)";
-  document.querySelectorAll(".screen-btn").forEach(b => b.disabled = true);
+  document.querySelectorAll(".screen-btn[data-status]").forEach(b => b.disabled = true);
 
   fetch(`/api/devices/${DEVICE_ID}/screen-test`, {
     method: "POST",
@@ -338,12 +353,69 @@ function submitScreenTest(status) {
       loadHistory(currentType, currentPage);
     })
     .catch(err => { msg.textContent = err.message; msg.style.color = "var(--fail)"; })
-    .finally(() => document.querySelectorAll(".screen-btn").forEach(b => b.disabled = false));
+    .finally(() => document.querySelectorAll(".screen-btn[data-status]").forEach(b => b.disabled = false));
 }
 
-document.querySelectorAll(".screen-btn").forEach(btn =>
+document.querySelectorAll(".screen-btn[data-status]").forEach(btn =>
   btn.addEventListener("click", () => submitScreenTest(btn.dataset.status))
 );
+
+// ── GPIO test (manual) ────────────────────────────────────────────────────────
+// [BCM, pino físico] na ordem do header de 40 pinos
+const GPIO_PINS  = [[2,3],[3,5],[4,7],[14,8],[15,10],[17,11],[18,12],[27,13],[22,15],[23,16],[24,18],
+                    [10,19],[9,21],[25,22],[11,23],[8,24],[7,26],[5,29],[6,31],[12,32],[13,33],[19,35],
+                    [16,36],[26,37],[20,38],[21,40]];
+const GPIO_NEXT  = { "": "lit", lit: "not_lit", not_lit: "" };
+const gpioState  = {};
+
+function renderGpio() {
+  document.getElementById("gpio-grid").innerHTML = GPIO_PINS.map(([bcm, phys]) => {
+    const st = gpioState[bcm] || "";
+    const icon = st === "lit" ? "✓" : st === "not_lit" ? "✗" : "";
+    return `<button class="gpio-pin ${st}" data-bcm="${bcm}">
+      <span class="gpio-bcm">GPIO${bcm}</span><span class="gpio-phys">pino ${phys} ${icon}</span>
+    </button>`;
+  }).join("");
+  document.getElementById("gpio-submit").disabled = !Object.values(gpioState).some(Boolean);
+}
+
+document.getElementById("gpio-grid").addEventListener("click", e => {
+  const btn = e.target.closest(".gpio-pin");
+  if (!btn) return;
+  const bcm = +btn.dataset.bcm;
+  gpioState[bcm] = GPIO_NEXT[gpioState[bcm] || ""];
+  renderGpio();
+});
+
+document.getElementById("gpio-submit").addEventListener("click", () => {
+  const pick = s => Object.keys(gpioState).filter(k => gpioState[k] === s).map(Number);
+  const msg  = document.getElementById("gpio-msg");
+  const btn  = document.getElementById("gpio-submit");
+  msg.textContent = "Salvando...";
+  msg.style.color = "var(--muted)";
+  btn.disabled = true;
+
+  fetch(`/api/devices/${DEVICE_ID}/gpio-test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ lit: pick("lit"), not_lit: pick("not_lit"),
+                           note: document.getElementById("gpio-note").value.trim() }),
+  })
+    .then(r => { if (!r.ok) throw new Error("Falha ao salvar"); return r.json(); })
+    .then(() => {
+      msg.textContent = "Salvo ✓";
+      msg.style.color = "var(--pass)";
+      Object.keys(gpioState).forEach(k => delete gpioState[k]);
+      document.getElementById("gpio-note").value = "";
+      renderGpio();
+      loadLatest();
+      currentPage = 1;
+      loadHistory(currentType, currentPage);
+    })
+    .catch(err => { msg.textContent = err.message; msg.style.color = "var(--fail)"; btn.disabled = false; });
+});
+
+renderGpio();
 
 document.getElementById("rename-btn").addEventListener("click", openRename);
 document.getElementById("rename-cancel").addEventListener("click", closeRename);

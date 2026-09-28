@@ -2,7 +2,7 @@
 """
 pitest.py — Raspberry Pi hardware diagnostics
 ==============================================
-Executa cinco baterias de testes no hardware da RPi e envia os resultados
+Executa seis baterias de testes no hardware da RPi e envia os resultados
 em JSON para uma API externa via HTTP POST.
 
 Testes executados (nessa ordem):
@@ -10,8 +10,12 @@ Testes executados (nessa ordem):
   wlan    — interface Wi-Fi, SSID, sinal, ping externo
   boot    — partição /boot, tempo de boot, units systemd com falha
   usb     — dispositivos USB conectados via lsusb + sysfs
+  bluetooth — controlador hci, rfkill, bluetoothd, power on e aguarda um celular conectar
   hotspot — cria um AP Wi-Fi e aguarda um cliente conectar (executa por último
              pois toma controle exclusivo da interface wlan)
+
+GPIO: durante toda a execução os pinos de GPIO_PINS piscam (LED + resistor
+entre o pino e o GND). O operador informa no site quais acenderam.
 
 Uso:
   sudo python3 pitest.py           # executa e envia para a API
@@ -24,13 +28,14 @@ Exit code:
 Dependências:
   pip install requests
   Ferramentas do sistema: ip, ping, iwconfig/iw, lsusb, findmnt,
-                          systemctl, systemd-analyze, nmcli
+                          systemctl, systemd-analyze, nmcli, bluetoothctl
 """
 
 import json
 import os
 import platform
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -66,6 +71,14 @@ HOTSPOT_SSID     = "PiTest"         # SSID do AP criado no teste de hotspot
 HOTSPOT_PASSWORD = "pitest123"      # senha WPA2 do AP
 HOTSPOT_TIMEOUT  = 300              # segundos aguardando um cliente conectar
 HOTSPOT_CON_NAME = "pitest-hotspot" # nome da conexão nmcli (removida após o teste)
+
+BT_TIMEOUT      = 300              # segundos aguardando um celular conectar via Bluetooth
+BT_ALIAS_PREFIX = "PiTest"         # nome visível no celular: "<prefixo> <hostname>"
+BT_REMOVE_AFTER = True             # remove o pareamento ao final (RPi fica limpa p/ o próximo teste)
+
+GPIO_PINS        = list(range(2, 28))  # pinos BCM que piscam (2–27 = todos do header de 40 pinos)
+GPIO_BLINK_HZ    = 1                   # frequência do pisca
+GPIO_BLINK_MIN_S = 60                  # tempo mínimo piscando antes de sair (modo --no-screen)
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -392,6 +405,194 @@ def _usb_ports_from_sysfs() -> dict:
     return ports
 
 
+# ─── BLUETOOTH ────────────────────────────────────────────────────────────────
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def test_bluetooth() -> dict:
+    """Testa o Bluetooth onboard (BCM43438 via UART na RPi 3B).
+
+    Critérios de aprovação (em ordem):
+      1. Controlador hci* presente em /sys/class/bluetooth
+      2. rfkill bluetooth desbloqueado
+      3. bluetooth.service ativo (tenta iniciar se parado)
+      4. Controlador liga (bluetoothctl power on) e reporta Powered: yes
+      5. Um celular pareia/conecta à RPi em até BT_TIMEOUT s
+         (a RPi fica visível como "PiTest <hostname>"; pareamento aceito
+         automaticamente, sem PIN)
+
+    Requer: bluez (bluetoothctl), rfkill, execução com sudo.
+    """
+    result: dict = {"status": "fail", "details": {}}
+
+    # 1. controlador presente
+    try:
+        controllers = sorted(n for n in os.listdir("/sys/class/bluetooth") if n.startswith("hci"))
+    except OSError:
+        controllers = []
+    result["details"]["controllers"] = controllers
+    if not controllers:
+        # na RPi 3B o controlador é anexado pelo hciuart.service
+        _, hciuart, _ = run(["systemctl", "is-active", "hciuart"])
+        result["details"]["hciuart"] = hciuart or None
+        result["message"] = f"No Bluetooth controller found (hciuart: {hciuart or 'n/a'})"
+        return result
+    hci = controllers[0]
+
+    # 2. rfkill
+    _, rfkill_out, _ = run(["rfkill", "list", "bluetooth"])
+    soft_blocked = "Soft blocked: yes" in rfkill_out
+    hard_blocked = "Hard blocked: yes" in rfkill_out
+    result["details"]["rfkill"] = {
+        "soft_blocked": soft_blocked,
+        "hard_blocked": hard_blocked,
+    }
+    if hard_blocked:
+        result["message"] = "Bluetooth hard blocked"
+        return result
+    if soft_blocked:
+        run(["rfkill", "unblock", "bluetooth"])
+
+    # 3. serviço bluez
+    _, svc, _ = run(["systemctl", "is-active", "bluetooth"])
+    if svc != "active":
+        run(["systemctl", "start", "bluetooth"], timeout=15)
+        time.sleep(2)
+        _, svc, _ = run(["systemctl", "is-active", "bluetooth"])
+    result["details"]["service"] = svc
+    if svc != "active":
+        result["message"] = f"bluetooth.service not active ({svc})"
+        return result
+
+    # 4. power on + info do controlador
+    run(["bluetoothctl", "power", "on"])
+    _, show, _ = run(["bluetoothctl", "show"])
+    show = _ANSI_RE.sub("", show)
+    m = re.search(r"Controller ([0-9A-F:]{17})", show)
+    controller = {
+        "hci":     hci,
+        "address": m.group(1) if m else None,
+        "powered": "Powered: yes" in show,
+    }
+    m = re.search(r"Name: (.+)", show)
+    if m:
+        controller["name"] = m.group(1).strip()
+    result["details"]["controller"] = controller
+    if not controller["powered"]:
+        result["message"] = f"{hci} does not power on"
+        return result
+
+    # 5. aguarda o celular conectar
+    alias = f"{BT_ALIAS_PREFIX} {DEVICE_ID}"
+    result["details"].update({"alias": alias, "timeout_s": BT_TIMEOUT})
+    print(f"\n    Bluetooth '{alias}' discoverable. Pair a phone within {BT_TIMEOUT}s...",
+          flush=True)
+
+    station = _bt_wait_for_connection(alias, BT_TIMEOUT)
+    if station is None:
+        result["message"] = "bluetoothctl could not start"
+        return result
+    if not station:
+        result["message"] = f"Timeout: no phone connected within {BT_TIMEOUT}s"
+        return result
+
+    result["details"]["station"] = station
+    result["status"] = "pass"
+    name = f" ({station['name']})" if station.get("name") else ""
+    result["message"] = f"Bluetooth OK — {station['mac']}{name} connected to {hci}"
+    return result
+
+
+def _bt_wait_for_connection(alias: str, timeout: int) -> dict | None:
+    """Deixa a RPi visível/pareável e espera um dispositivo conectar.
+
+    Mantém um `bluetoothctl` interativo aberto: ele registra um agente
+    NoInputNoOutput (pareamento "Just Works") e responde "yes" a qualquer
+    prompt do agente (confirmação de passkey, autorização de serviço).
+    Detecta a conexão pelo evento `[CHG] Device <MAC> Connected: yes`.
+
+    Retorna dict {mac, name?, paired} do dispositivo, {} em timeout, ou None
+    se o bluetoothctl não puder ser iniciado. Ao final desliga discoverable/
+    pairable, restaura o alias e (se BT_REMOVE_AFTER) remove o pareamento.
+    """
+    try:
+        proc = subprocess.Popen(["bluetoothctl"], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except FileNotFoundError:
+        return None
+
+    def send(cmd: str) -> None:
+        try:
+            proc.stdin.write((cmd + "\n").encode())
+            proc.stdin.flush()
+        except OSError:
+            pass
+
+    names: dict = {}
+    paired: set = set()
+    connected: list = []
+    event = threading.Event()
+
+    def parse(line: str) -> None:
+        m = re.search(r"Device ([0-9A-F:]{17}) (.*)", line)
+        if not m:
+            return
+        mac, rest = m.group(1), m.group(2).strip()
+        if rest == "Connected: yes":
+            connected.append(mac)
+            event.set()
+        elif rest == "Paired: yes":
+            paired.add(mac)
+        elif "[NEW]" in line and rest and ":" not in rest:
+            names[mac] = rest
+
+    def reader() -> None:
+        buf = ""
+        while True:
+            chunk = os.read(proc.stdout.fileno(), 1024)
+            if not chunk:
+                break
+            buf += _ANSI_RE.sub("", chunk.decode(errors="replace")).replace("\r", "\n")
+            *lines, buf = buf.split("\n")
+            for line in lines:
+                parse(line)
+            # prompts do agente não terminam em \n — responde assim que aparecem
+            if "(yes/no)" in buf:
+                send("yes")
+                buf = ""
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    for cmd in ("power on", f"system-alias {alias}", "agent NoInputNoOutput",
+                "default-agent", "pairable on", "discoverable-timeout 0", "discoverable on"):
+        send(cmd)
+        time.sleep(0.3)
+
+    station: dict = {}
+    try:
+        if event.wait(timeout):
+            mac = connected[0]
+            time.sleep(3)  # dá tempo p/ o pareamento concluir e o evento Paired chegar
+            station = {"mac": mac, "paired": mac in paired}
+            if mac in names:
+                station["name"] = names[mac]
+    finally:
+        send("discoverable off")
+        send("pairable off")
+        send("reset-alias")
+        if station and BT_REMOVE_AFTER:
+            send(f"remove {station['mac']}")
+        time.sleep(1)
+        send("quit")
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    return station
+
+
 # ─── HOTSPOT ─────────────────────────────────────────────────────────────────
 
 def test_hotspot() -> dict:
@@ -484,6 +685,63 @@ def get_device_mac() -> str | None:
     return None
 
 
+# ─── GPIO ─────────────────────────────────────────────────────────────────────
+
+class GpioBlinker:
+    """Pisca os pinos GPIO_PINS em thread de fundo p/ o teste manual de GPIO.
+
+    Usa o CLI `pinctrl` (Raspberry Pi OS bookworm) ou `raspi-gpio` (legado) —
+    ambos aceitam `set <lista> op dh|dl` e `set <lista> ip`. Ao parar, devolve
+    os pinos para input (pulls originais mantidos).
+    """
+
+    def __init__(self, pins: list[int] = GPIO_PINS, hz: float = GPIO_BLINK_HZ):
+        self.pins    = ",".join(str(p) for p in pins)
+        self.half    = 1 / (2 * hz)
+        self.tool    = shutil.which("pinctrl") or shutil.which("raspi-gpio")
+        self.started = None
+        self._stop   = threading.Event()
+        self._thread = None
+
+    def start(self) -> bool:
+        """Inicia o pisca. Retorna False se nenhuma ferramenta estiver disponível."""
+        if not self.tool:
+            print("[pitest] GPIO: pinctrl/raspi-gpio não encontrado — pinos não vão piscar")
+            return False
+        code, _, err = run([self.tool, "set", self.pins, "op", "dl"])
+        if code != 0:
+            print(f"[pitest] GPIO: falha ao configurar pinos ({err})")
+            return False
+        self.started = time.monotonic()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        print(f"[pitest] GPIO {self.pins} piscando — informe no site quais LEDs acenderam\n")
+        return True
+
+    def _loop(self) -> None:
+        level = "dh"
+        while not self._stop.is_set():
+            run([self.tool, "set", self.pins, level])
+            level = "dl" if level == "dh" else "dh"
+            self._stop.wait(self.half)
+
+    def wait_min(self, seconds: float = GPIO_BLINK_MIN_S) -> None:
+        """Bloqueia até o pisca ter rodado ao menos `seconds`."""
+        if self.started is None:
+            return
+        remaining = seconds - (time.monotonic() - self.started)
+        if remaining > 0:
+            print(f"[pitest] GPIO piscando por mais {int(remaining)}s...", flush=True)
+            time.sleep(remaining)
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join()
+        run([self.tool, "set", self.pins, "ip"])
+
+
 # ─── API SEND ─────────────────────────────────────────────────────────────────
 
 def send_results(payload: dict) -> dict:
@@ -517,7 +775,7 @@ def send_results(payload: dict) -> dict:
 # ─── PROGRESS ───────────────────────────────────────────────────────────────
 
 # Ordem dos testes — hotspot por último (toma controle exclusivo da wlan).
-TEST_ORDER = ("lan", "wlan", "boot", "usb", "hotspot")
+TEST_ORDER = ("lan", "wlan", "boot", "usb", "bluetooth", "hotspot")
 
 
 class Progress:
@@ -569,6 +827,7 @@ def run_diagnostics(progress: "Progress | None" = None) -> tuple[dict, bool]:
         "wlan":    test_wlan,
         "boot":    test_boot,
         "usb":     test_usb,
+        "bluetooth": test_bluetooth,
         "hotspot": test_hotspot,   # deve ser o último — toma controle da interface wlan
     }
 
@@ -627,13 +886,17 @@ def main() -> None:
     """Ponto de entrada.
 
     Por padrão abre o teste visual de tela (screen_test) em fullscreen enquanto
-    os diagnósticos rodam em uma thread de fundo. Ao terminarem, os resultados
+    os diagnósticos rodam em uma thread de fundo. Os GPIOs piscam durante toda
+    a execução (no modo --no-screen, por no mínimo GPIO_BLINK_MIN_S). Ao terminarem, os resultados
     são enviados automaticamente, mas a tela CONTINUA rodando — fecha só quando
     o usuário pressiona ESC/Q. O overlay mostra "[done — ESC to exit]" quando
     os testes acabam. Use --no-screen p/ rodar só no console (ou quando não há
     pygame/display, o fallback é automático).
     """
     use_screen = screenTest is not None and "--no-screen" not in sys.argv
+
+    gpio = GpioBlinker()
+    gpio_on = gpio.start()
 
     if use_screen:
         progress = Progress()
@@ -650,7 +913,7 @@ def main() -> None:
                 done.set()
 
         def status() -> str:
-            line = progress.line()
+            line = progress.line() + ("  GPIO:blink" if gpio_on else "")
             return line + "  [done — ESC to exit]" if done.is_set() else line
 
         t = threading.Thread(target=worker, daemon=True)
@@ -666,7 +929,9 @@ def main() -> None:
     else:
         payload, overall_pass = run_diagnostics()
         report_and_send(payload, overall_pass)
+        gpio.wait_min()
 
+    gpio.stop()
     sys.exit(0 if overall_pass else 1)
 
 
