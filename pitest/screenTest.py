@@ -33,11 +33,13 @@ except ImportError:
 # ─── STATIC TESTS ─────────────────────────────────────────────────────────────
 
 def draw_solid(screen, color, label):
+    """Preenche a tela com uma cor sólida (pixels mortos/presos)."""
     screen.fill(color)
     _draw_label(screen, label)
 
 
 def draw_checkerboard(screen, _t):
+    """Xadrez preto/branco de 32 px (nitidez e uniformidade)."""
     cell = 32
     W, H = screen.get_size()
     screen.fill((0, 0, 0))
@@ -49,6 +51,7 @@ def draw_checkerboard(screen, _t):
 
 
 def draw_crosshair(screen, _t):
+    """Cruz central, cantos e círculo (geometria e overscan)."""
     W, H = screen.get_size()
     screen.fill((0, 0, 0))
     cx, cy = W // 2, H // 2
@@ -65,6 +68,7 @@ def draw_crosshair(screen, _t):
 
 
 def draw_fine_grid(screen, _t):
+    """Grade fina de 8 px (foco e moiré)."""
     gap = 8
     W, H = screen.get_size()
     screen.fill((0, 0, 0))
@@ -134,6 +138,7 @@ def draw_gradient_gray(screen, t):
 # ─── LABEL ────────────────────────────────────────────────────────────────────
 
 def _draw_label(screen, text):
+    """Nome do teste no canto inferior esquerdo e dica de ESC no direito."""
     W, H = screen.get_size()
     font = pygame.font.SysFont("monospace", 18)
     surf = font.render(text, True, (200, 200, 200))
@@ -150,15 +155,18 @@ def _draw_label(screen, text):
 
 
 def _draw_status(screen, text):
-    """Overlay de uma linha no canto superior esquerdo (progresso de fundo)."""
+    """Overlay no canto superior esquerdo (progresso de fundo); uma caixa por linha."""
     if not text:
         return
     font = pygame.font.SysFont("monospace", 16)
-    surf = font.render(text, True, (220, 220, 220))
-    bg = pygame.Surface((surf.get_width() + 8, surf.get_height() + 4), pygame.SRCALPHA)
-    bg.fill((0, 0, 0, 150))
-    screen.blit(bg, (8, 8))
-    screen.blit(surf, (12, 10))
+    y = 8
+    for line in text.split("\n"):
+        surf = font.render(line, True, (220, 220, 220))
+        bg = pygame.Surface((surf.get_width() + 8, surf.get_height() + 4), pygame.SRCALPHA)
+        bg.fill((0, 0, 0, 150))
+        screen.blit(bg, (8, y))
+        screen.blit(surf, (12, y + 2))
+        y += bg.get_height() + 2
 
 
 def _draw_notice(screen, text):
@@ -241,6 +249,7 @@ def run(stop_event=None, status_fn=None, notice_fn=None):
         _, draw_fn, animated = TESTS[idx]
 
         def _render(t):
+            """Desenha o frame atual com os overlays e exibe."""
             draw_fn(screen, t)
             if status_fn is not None:
                 _draw_status(screen, status_fn())
@@ -276,6 +285,7 @@ def run(stop_event=None, status_fn=None, notice_fn=None):
 
 
 def main():
+    """Executa o teste de tela sozinho (sem os diagnósticos)."""
     if pygame is None:
         sys.exit("Missing: pip install pygame")
     run()

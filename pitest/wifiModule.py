@@ -1,20 +1,32 @@
+"""
+wifiModule.py — gerenciamento do hotspot Wi-Fi (hostapd + dnsmasq) do teste de hotspot
+"""
+
 import re
 import subprocess
 import time
 
 
 class WifiManager:
+    """Cria e desfaz um hotspot Wi-Fi (hostapd + dnsmasq) na interface wlan.
+
+    Usado pelo teste de hotspot. Requer root.
+    """
+
     def __init__(self, ssid: str = "PiTest", password: str = "pitest123"):
+        """Guarda SSID/senha do AP e detecta a interface Wi-Fi (fallback wlan0)."""
         self.ssid = ssid
         self.password = password
         self.interface = self._detectWifiInterface() or "wlan0"
 
     def prepare_environment(self):
+        """Instala hostapd e dnsmasq via apt e habilita os serviços (1ª execução)."""
         self._run_command(["sudo", "apt", "update"])
         self._run_command(["sudo", "apt", "install", "-y", "hostapd", "dnsmasq"])
         self._prepareServices()
 
     def _run_command(self, cmd, check=True, capture_output=True, text=True):
+        """Executa `cmd`; com check=True converte falha em RuntimeError com o stderr."""
         try:
             return subprocess.run(
                 cmd,
@@ -27,11 +39,13 @@ class WifiManager:
             raise RuntimeError(f"erro ao executar {' '.join(cmd)}: {stderr}") from exc
 
     def _prepareServices(self):
+        """Desmascara e habilita hostapd e dnsmasq no systemd."""
         self._run_command(["sudo", "systemctl", "unmask", "hostapd"])
         self._run_command(["sudo", "systemctl", "enable", "hostapd"])
         self._run_command(["sudo", "systemctl", "enable", "dnsmasq"])
 
     def _checkWifiCapabilities(self):
+        """Retorna True se o driver suporta o modo AP (iw list)."""
         try:
             result = self._run_command(["iw", "list"])
             output = result.stdout or ""
@@ -40,6 +54,7 @@ class WifiManager:
             return False
 
     def configureFiles(self):
+        """Gera /etc/hostapd/hostapd.conf e /etc/dnsmasq.conf para o AP."""
         if not self._checkWifiCapabilities():
             raise RuntimeError(f"a interface {self.interface} não suporta modo AP")
 
@@ -89,9 +104,11 @@ dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
             raise RuntimeError(f"erro ao configurar arquivos do hotspot: {exc}") from exc
 
     def _detectDriver(self):
+        """Driver do hostapd (nl80211 serve para o chip da RPi)."""
         return "nl80211"
 
     def _unblockWifi(self):
+        """Remove bloqueios de rfkill do Wi-Fi."""
         try:
             self._run_command(["sudo", "rfkill", "unblock", "wifi"], check=False)
             self._run_command(["sudo", "rfkill", "unblock", "all"], check=False)
@@ -100,6 +117,10 @@ dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
             return False
 
     def startHotspot(self):
+        """Para NetworkManager/wpa_supplicant e sobe o AP em 192.168.4.1/24.
+
+        Levanta RuntimeError se algum passo obrigatório falhar.
+        """
         try:
             self._unblockWifi()
 
@@ -135,6 +156,7 @@ dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
             raise RuntimeError(f"erro ao iniciar hotspot: {exc}") from exc
 
     def stopHotspot(self):
+        """Derruba o AP e devolve a interface ao NetworkManager."""
         try:
             self._run_command(["sudo", "systemctl", "stop", "hostapd"], check=False)
             self._run_command(["sudo", "systemctl", "stop", "dnsmasq"], check=False)
@@ -178,6 +200,7 @@ dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
         return None
 
     def _parse_station_dump(self, out: str) -> dict:
+        """Extrai MAC, sinal, bytes e bitrate de `iw station dump`."""
         info: dict = {}
 
         m = re.search(r"Station ([0-9a-f:]{17})", out)
@@ -210,6 +233,7 @@ dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
         return info
 
     def _detectWifiInterface(self):
+        """Retorna a primeira interface wlan*/wlp* de `iw dev`, ou None."""
         try:
             result = self._run_command(["iw", "dev"], check=False)
             output = result.stdout or ""

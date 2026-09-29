@@ -78,10 +78,12 @@ _attempts: dict[str, dict] = {}  # ip -> {count, locked_until}
 
 
 def _get_ip() -> str:
+    """IP do cliente (primeiro de X-Forwarded-For, que o Vercel preenche)."""
     return request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
 
 
 def _check_lockout(ip: str) -> tuple[bool, int]:
+    """Retorna (bloqueado, segundos restantes) para o IP."""
     rec = _attempts.get(ip)
     if not rec:
         return False, 0
@@ -92,6 +94,10 @@ def _check_lockout(ip: str) -> tuple[bool, int]:
 
 
 def _record_failure(ip: str) -> int:
+    """Conta uma falha de login; bloqueia o IP ao atingir _MAX_ATTEMPTS.
+
+    Retorna quantas tentativas ainda restam (0 = acabou de bloquear).
+    """
     rec = _attempts.setdefault(ip, {"count": 0, "locked_until": 0.0})
     rec["count"] += 1
     if rec["count"] >= _MAX_ATTEMPTS:
@@ -102,12 +108,14 @@ def _record_failure(ip: str) -> int:
 
 
 def _reset_attempts(ip: str) -> None:
+    """Zera o contador de falhas do IP após login bem-sucedido."""
     _attempts.pop(ip, None)
 
 
 # ─── AUTH ─────────────────────────────────────────────────────────────────────
 
 def _bearer_token() -> str | None:
+    """Token do header `Authorization: Bearer <token>`, ou None."""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
@@ -115,13 +123,19 @@ def _bearer_token() -> str | None:
 
 
 def _bearer_valid() -> bool:
+    """True se o Bearer token bate com PITEST_API_TOKEN (usado pela RPi)."""
     token = _bearer_token()
     return bool(_API_TOKEN and token == _API_TOKEN)
 
 
 def login_required(f):
+    """Decorator: exige sessão logada ou Bearer token válido.
+
+    Rotas /api/* respondem 401 JSON; páginas redirecionam para o login.
+    """
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
+        """Libera a rota se autenticado, senão 401 (API) ou redirect (página)."""
         if session.get("logged_in") or _bearer_valid():
             return f(*args, **kwargs)
         if request.path.startswith("/api/"):
@@ -131,6 +145,7 @@ def login_required(f):
 
 
 def _safe_next(next_url: str | None) -> str:
+    """Valida o destino pós-login: só caminhos locais (evita open redirect)."""
     if next_url and next_url.startswith("/") and not next_url.startswith("//"):
         return next_url
     return url_for("index")
@@ -138,6 +153,7 @@ def _safe_next(next_url: str | None) -> str:
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    """Tela e POST de login, com bloqueio por IP após tentativas erradas."""
     if session.get("logged_in"):
         return redirect(url_for("index"))
 
@@ -175,6 +191,7 @@ def login():
 
 @app.route("/logout")
 def logout():
+    """Encerra a sessão e volta para o login."""
     session.clear()
     return redirect(url_for("login"))
 
@@ -184,12 +201,14 @@ def logout():
 @app.route("/")
 @login_required
 def index():
+    """Página inicial: lista de devices."""
     return render_template("index.html")
 
 
 @app.route("/rasp/<int:device_id>")
 @login_required
 def rasp(device_id):
+    """Página de detalhes e histórico de um device."""
     return render_template("rasp.html", device_id=device_id)
 
 
