@@ -34,6 +34,7 @@ Dependências:
 import json
 import os
 import platform
+import pty
 import re
 import shutil
 import socket
@@ -407,7 +408,8 @@ def _usb_ports_from_sysfs() -> dict:
 
 # ─── BLUETOOTH ────────────────────────────────────────────────────────────────
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# cores ANSI + sequências do readline (limpa linha, marcadores \x01/\x02)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|[\x01\x02]")
 
 
 def test_bluetooth() -> dict:
@@ -486,97 +488,105 @@ def test_bluetooth() -> dict:
     # 5. aguarda o celular conectar
     alias = f"{BT_ALIAS_PREFIX} {DEVICE_ID}"
     result["details"].update({"alias": alias, "timeout_s": BT_TIMEOUT})
-    print(f"\n    Bluetooth '{alias}' discoverable. Pair a phone within {BT_TIMEOUT}s...",
-          flush=True)
+    notify(f"Bluetooth: pareie o celular com '{alias}' ({BT_TIMEOUT}s)")
 
-    station = _bt_wait_for_connection(alias, BT_TIMEOUT)
+    try:
+        station = _bt_wait_for_connection(alias, BT_TIMEOUT)
+    finally:
+        notify("")
     if station is None:
         result["message"] = "bluetoothctl could not start"
         return result
     if not station:
-        result["message"] = f"Timeout: no phone connected within {BT_TIMEOUT}s"
+        result["message"] = f"Timeout: no phone paired within {BT_TIMEOUT}s"
         return result
 
     result["details"]["station"] = station
     result["status"] = "pass"
     name = f" ({station['name']})" if station.get("name") else ""
-    result["message"] = f"Bluetooth OK — {station['mac']}{name} connected to {hci}"
+    result["message"] = f"Bluetooth OK — {station['mac']}{name} paired with {hci}"
     return result
 
 
 def _bt_wait_for_connection(alias: str, timeout: int) -> dict | None:
-    """Deixa a RPi visível/pareável e espera um dispositivo conectar.
+    """Deixa a RPi visível/pareável e espera um celular parear.
 
-    Mantém um `bluetoothctl` interativo aberto: ele registra um agente
-    NoInputNoOutput (pareamento "Just Works") e responde "yes" a qualquer
-    prompt do agente (confirmação de passkey, autorização de serviço).
-    Detecta a conexão pelo evento `[CHG] Device <MAC> Connected: yes`.
+    Mantém um `bluetoothctl` interativo aberto num pseudo-terminal (em pipe ele
+    bufferiza a saída e os prompts do agente nunca chegam). O agente é
+    DisplayYesNo: o celular mostra um código de 6 dígitos, o mesmo código é
+    exibido na tela da RPi (notify) e confirmado automaticamente.
 
-    Retorna dict {mac, name?, paired} do dispositivo, {} em timeout, ou None
-    se o bluetoothctl não puder ser iniciado. Ao final desliga discoverable/
-    pairable, restaura o alias e (se BT_REMOVE_AFTER) remove o pareamento.
+    O sucesso é detectado por polling (`bluetoothctl info`): um dispositivo que
+    não estava pareado antes passa a Paired: yes.
+
+    Retorna dict {mac, name?, connected, passkey?} do dispositivo, {} em
+    timeout, ou None se o bluetoothctl não puder ser iniciado. Ao final desliga
+    discoverable/pairable, restaura o alias e (se BT_REMOVE_AFTER) remove o
+    pareamento.
     """
+    master, slave = pty.openpty()
     try:
-        proc = subprocess.Popen(["bluetoothctl"], stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(["bluetoothctl", "--agent", "DisplayYesNo"],
+                                stdin=slave, stdout=slave, stderr=slave, close_fds=True)
     except FileNotFoundError:
+        os.close(master)
+        os.close(slave)
         return None
+    os.close(slave)
 
     def send(cmd: str) -> None:
         try:
-            proc.stdin.write((cmd + "\n").encode())
-            proc.stdin.flush()
+            os.write(master, (cmd + "\n").encode())
         except OSError:
             pass
 
-    names: dict = {}
-    paired: set = set()
-    connected: list = []
-    event = threading.Event()
-
-    def parse(line: str) -> None:
-        m = re.search(r"Device ([0-9A-F:]{17}) (.*)", line)
-        if not m:
-            return
-        mac, rest = m.group(1), m.group(2).strip()
-        if rest == "Connected: yes":
-            connected.append(mac)
-            event.set()
-        elif rest == "Paired: yes":
-            paired.add(mac)
-        elif "[NEW]" in line and rest and ":" not in rest:
-            names[mac] = rest
+    passkey: dict = {}
 
     def reader() -> None:
         buf = ""
         while True:
-            chunk = os.read(proc.stdout.fileno(), 1024)
+            try:
+                chunk = os.read(master, 1024)
+            except OSError:  # EIO quando o bluetoothctl encerra
+                break
             if not chunk:
                 break
-            buf += _ANSI_RE.sub("", chunk.decode(errors="replace")).replace("\r", "\n")
-            *lines, buf = buf.split("\n")
-            for line in lines:
-                parse(line)
-            # prompts do agente não terminam em \n — responde assim que aparecem
+            buf = (buf + _ANSI_RE.sub("", chunk.decode(errors="replace")))[-2048:]
+            # prompts do agente: "Confirm passkey 123456 (yes/no):",
+            # "Authorize service ... (yes/no):", "Accept pairing (yes/no):"
             if "(yes/no)" in buf:
+                m = re.search(r"[Pp]asskey (\d+)", buf)
+                if m:
+                    passkey["code"] = m.group(1).zfill(6)
+                    notify(f"Bluetooth: confirme no celular o codigo  {passkey['code']}")
                 send("yes")
                 buf = ""
+            elif "\n" in buf:
+                buf = buf.rsplit("\n", 1)[1]
 
     threading.Thread(target=reader, daemon=True).start()
 
-    for cmd in ("power on", f"system-alias {alias}", "agent NoInputNoOutput",
-                "default-agent", "pairable on", "discoverable-timeout 0", "discoverable on"):
+    for cmd in ("power on", f"system-alias {alias}", "default-agent", "pairable on",
+                "discoverable-timeout 0", "discoverable on"):
         send(cmd)
         time.sleep(0.3)
 
+    baseline = {mac for mac, st in _bt_devices().items() if st["paired"]}
     station: dict = {}
     try:
-        if event.wait(timeout):
-            mac = connected[0]
-            time.sleep(3)  # dá tempo p/ o pareamento concluir e o evento Paired chegar
-            station = {"mac": mac, "paired": mac in paired}
-            if mac in names:
-                station["name"] = names[mac]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and proc.poll() is None:
+            for mac, st in _bt_devices().items():
+                if st["paired"] and mac not in baseline:
+                    station = {"mac": mac, "connected": st["connected"]}
+                    if st.get("name"):
+                        station["name"] = st["name"]
+                    if passkey:
+                        station["passkey"] = passkey["code"]
+                    break
+            if station:
+                break
+            time.sleep(1)
     finally:
         send("discoverable off")
         send("pairable off")
@@ -589,8 +599,25 @@ def _bt_wait_for_connection(alias: str, timeout: int) -> dict | None:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+        os.close(master)
 
     return station
+
+
+def _bt_devices() -> dict:
+    """Estado dos dispositivos conhecidos pelo bluez: {mac: {name, paired, connected}}."""
+    devices: dict = {}
+    _, out, _ = run(["bluetoothctl", "devices"])
+    for mac in re.findall(r"Device ([0-9A-F:]{17})", _ANSI_RE.sub("", out)):
+        _, info, _ = run(["bluetoothctl", "info", mac])
+        info = _ANSI_RE.sub("", info)
+        m = re.search(r"Name: (.+)", info)
+        devices[mac] = {
+            "name":      m.group(1).strip() if m else None,
+            "paired":    "Paired: yes" in info,
+            "connected": "Connected: yes" in info,
+        }
+    return devices
 
 
 # ─── HOTSPOT ─────────────────────────────────────────────────────────────────
@@ -624,12 +651,12 @@ def test_hotspot() -> dict:
         return result
 
     result["details"]["hotspot_up"] = True
-    print(f"\n    Hotspot '{HOTSPOT_SSID}' up on {wifi.interface}. Waiting up to {HOTSPOT_TIMEOUT}s for a client...",
-          flush=True)
+    notify(f"Wi-Fi: conecte em '{HOTSPOT_SSID}' senha '{HOTSPOT_PASSWORD}' ({HOTSPOT_TIMEOUT}s)")
 
     try:
         station = wifi.wait_for_station(HOTSPOT_TIMEOUT)
     finally:
+        notify("")
         wifi.stopHotspot()
 
     if station:
@@ -802,6 +829,28 @@ class Progress:
         with self._lock:
             return "  ".join(f"{n.upper()}:{self._status[n]}" for n in self._names)
 
+    def set_notice(self, text: str) -> None:
+        with self._lock:
+            self._notice = text
+
+    def notice(self) -> str:
+        with self._lock:
+            return getattr(self, "_notice", "")
+
+
+_progress: "Progress | None" = None
+
+
+def notify(text: str) -> None:
+    """Mostra uma instrução ao operador: console + destaque na tela (se ativa).
+
+    Texto vazio limpa o destaque da tela.
+    """
+    if text:
+        print(f"\n    >> {text}", flush=True)
+    if _progress:
+        _progress.set_notice(text)
+
 
 # ─── DIAGNOSTICS ──────────────────────────────────────────────────────────────
 
@@ -830,6 +879,9 @@ def run_diagnostics(progress: "Progress | None" = None) -> tuple[dict, bool]:
         "bluetooth": test_bluetooth,
         "hotspot": test_hotspot,   # deve ser o último — toma controle da interface wlan
     }
+
+    global _progress
+    _progress = progress
 
     results: dict = {}
     overall_pass = True
@@ -921,7 +973,7 @@ def main() -> None:
         try:
             # Sem stop_event: a tela roda até o usuário sair (ESC/Q/quit),
             # mesmo depois de os diagnósticos terminarem.
-            screenTest.run(status_fn=status)
+            screenTest.run(status_fn=status, notice_fn=progress.notice)
         except Exception as e:
             print(f"[pitest] screen test indisponível ({e}); seguindo no console.")
         t.join()

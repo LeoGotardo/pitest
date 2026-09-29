@@ -29,6 +29,7 @@ Variáveis de ambiente:
 
 import functools
 import os
+import re
 import time
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
@@ -39,7 +40,18 @@ load_dotenv()
 
 
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DB_DATABASE_URL")
+def _db_url(url: str | None) -> str | None:
+    """Força o driver psycopg2 (o único em requirements.txt).
+
+    A URL pode vir como postgres://, postgresql:// ou postgresql+psycopg://
+    (psycopg 3) dependendo de quem a gerou — as duas últimas quebram o import.
+    """
+    if not url:
+        return url
+    return re.sub(r"^postgres(?:ql)?(?:\+\w+)?://", "postgresql+psycopg2://", url)
+
+
+app.config["SQLALCHEMY_DATABASE_URI"] = _db_url(os.environ.get("DB_DATABASE_URL"))
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 # Neon encerra conexões ociosas; pre_ping evita usar uma conexão morta.
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}

@@ -161,6 +161,25 @@ def _draw_status(screen, text):
     screen.blit(surf, (12, 10))
 
 
+def _draw_notice(screen, text):
+    """Caixa grande centralizada p/ instruções ao operador (ex.: código Bluetooth)."""
+    if not text:
+        return
+    W, H = screen.get_size()
+    font = pygame.font.SysFont("monospace", max(24, H // 18), bold=True)
+    surf = font.render(text, True, (255, 255, 255))
+    if surf.get_width() > W - 40:
+        surf = pygame.transform.smoothscale(
+            surf, (W - 40, int(surf.get_height() * (W - 40) / surf.get_width())))
+    pad = 24
+    bg = pygame.Surface((surf.get_width() + 2 * pad, surf.get_height() + 2 * pad), pygame.SRCALPHA)
+    bg.fill((0, 0, 0, 220))
+    x, y = (W - bg.get_width()) // 2, (H - bg.get_height()) // 2
+    screen.blit(bg, (x, y))
+    pygame.draw.rect(screen, (255, 255, 0), (x, y, bg.get_width(), bg.get_height()), 3)
+    screen.blit(surf, (x + pad, y + pad))
+
+
 # ─── TEST SEQUENCE ────────────────────────────────────────────────────────────
 # Each entry: (label, draw_fn(screen, t), animated)
 # animated=True  → redraws every frame, t goes 0.0→1.0 over INTERVAL_MS
@@ -186,7 +205,7 @@ TESTS = [
 INTERVAL_MS = 3000
 
 
-def run(stop_event=None, status_fn=None):
+def run(stop_event=None, status_fn=None, notice_fn=None):
     """Roda o loop do teste de tela em fullscreen.
 
     Sai quando o usuário pressiona ESC/Q/fecha a janela, ou quando
@@ -198,6 +217,8 @@ def run(stop_event=None, status_fn=None):
                    os diagnósticos).
       status_fn  — callable opcional retornando uma string curta; exibida no
                    canto superior esquerdo (ex.: progresso dos diagnósticos).
+      notice_fn  — callable opcional retornando uma instrução ao operador;
+                   quando não vazia, exibida em destaque no centro da tela.
 
     Retorna:
       True  — encerrado pelo usuário (ESC/Q/quit)
@@ -223,6 +244,8 @@ def run(stop_event=None, status_fn=None):
             draw_fn(screen, t)
             if status_fn is not None:
                 _draw_status(screen, status_fn())
+            if notice_fn is not None:
+                _draw_notice(screen, notice_fn())
             pygame.display.flip()
 
         while True:
