@@ -10,9 +10,10 @@ Diagnóstico de hardware para Raspberry Pi 3B com painel web de histórico.
 2. [Ambiente](#2-ambiente)
 3. [Operação](#3-operação)
 4. [Particularidades](#4-particularidades)
-5. [Referência: testes, configuração, API e interface web](#5-referência)
-6. [Versionamento e imagens](#6-versionamento-e-imagens)
-7. [Decisões técnicas](docs/decisions.md)
+5. [Info: paths, login e senhas](#5-info)
+6. [Referência: testes, configuração, API e interface web](#6-referência)
+7. [Versionamento e imagens](#7-versionamento-e-imagens)
+8. [Decisões técnicas](docs/decisions.md)
 
 ---
 
@@ -204,17 +205,7 @@ Sem SSH e com teclado na RPi: **Ctrl+Alt+F2** abre outro terminal (o `tty1` é d
 pitest). Para impedir o pitest de subir, adicione ` systemd.mask=pitest.service` ao
 final da linha de `/boot/firmware/cmdline.txt` (dá para editar com o cartão no PC).
 
-### Paths úteis
-
-| Path | Conteúdo |
-|---|---|
-| `/home/pi/test/` | script do pitest + `venv/` |
-| `/home/pi/test/.env` | `PITEST_API_TOKEN` |
-| `/etc/systemd/system/pitest.service` | link para `/home/pi/test/pitest.service` |
-| `journalctl -u pitest` | logs do pitest |
-| `/etc/hostapd/hostapd.conf`, `/etc/dnsmasq.conf` | gerados pelo teste de hotspot |
-| `/boot/firmware/cmdline.txt`, `/boot/firmware/config.txt` | boot do kernel / overlays |
-| `.env` na raiz do repositório (dev) | variáveis do servidor |
+Paths de logs e configs: ver [Info](#5-info).
 
 ---
 
@@ -245,7 +236,86 @@ final da linha de `/boot/firmware/cmdline.txt` (dá para editar com o cartão no
 
 ---
 
-## 5. Referência
+## 5. Info
+
+### Paths úteis
+
+**Logs**
+
+| Onde | Conteúdo |
+|---|---|
+| `sudo journalctl -u pitest -b` | saída do pitest no boot atual (testes, envio, erros) |
+| `sudo journalctl -u hostapd -u dnsmasq -b` | hotspot (AP e DHCP) |
+| `sudo journalctl -u bluetooth -u hciuart -b` | Bluetooth |
+| `dmesg` | kernel: Wi-Fi (`brcmf`), Bluetooth (`hci0`), subtensão |
+| Vercel → projeto `pitest` → *Logs* | erros do servidor web / API |
+
+**Configs (RPi)**
+
+| Path | Conteúdo |
+|---|---|
+| `/home/pi/test/` | script do pitest (conteúdo de `pitest/` do repo) + `venv/` |
+| `/home/pi/test/config.py` | URL da API, timeouts, SSID/senha do hotspot, pinos GPIO |
+| `/home/pi/test/.env` | `PITEST_API_TOKEN` (segredo) |
+| `/home/pi/test/pitest.service` | unit systemd (`/etc/systemd/system/pitest.service` é link para ele) |
+| `/etc/hostapd/hostapd.conf`, `/etc/default/hostapd` | AP do teste de hotspot (gerados pelo `wifiModule`) |
+| `/etc/dnsmasq.conf` | DHCP do hotspot (gerado pelo `wifiModule`; sobrescreve o original) |
+| `/etc/NetworkManager/system-connections/` | redes Wi-Fi/cabo conhecidas |
+| `/boot/firmware/cmdline.txt` | linha do kernel (ex.: `systemd.mask=pitest.service`) |
+| `/boot/firmware/config.txt` | overlays (`disable-wifi`, `disable-bt`…) |
+| `/etc/hostname` | hostname — vira o `device_id` no site |
+
+**Configs (servidor)**
+
+| Path | Conteúdo |
+|---|---|
+| `.env` na raiz do repo (dev, fora do git) | variáveis do servidor |
+| Vercel → *Settings → Environment Variables* | variáveis do servidor em produção |
+| `vercel.json` | rewrites do Vercel |
+
+**Dados**
+
+| Onde | Conteúdo |
+|---|---|
+| Postgres (Neon) em `DB_DATABASE_URL` | tabelas `device` e `test` — todo o histórico |
+| `src/instance/pitest.db` | SQLite local antigo (não usado quando `DB_DATABASE_URL` está definido) |
+| `Images/{beta,stable,old}/` | imagens de SD (fora do git) |
+
+### Login e senhas
+
+> **Não escreva senhas neste arquivo.** O repositório é **público** no GitHub —
+> qualquer valor commitado fica exposto e permanece no histórico do git. A tabela
+> diz **qual** credencial existe e **onde** ela fica; os valores ficam no
+> gerenciador de senhas da equipe (ou nos `.env`/Vercel, fora do git).
+
+| Acesso | Usuário | Senha / segredo — onde fica | Observação |
+|---|---|---|---|
+| RPi — login local e SSH | `pi` | pitest | para trocar sem acesso: editar `/etc/shadow` com o cartão no PC (`openssl passwd -6`) |
+| RPi — `root` | `root` | pitest | use `sudo` com o usuário `pi` |
+| RPi — `sudo` | `pi` | pitest | conferir com `sudo -l` |
+| Site (painel web) | `PITEST_USER` | `PITEST_PASSWORD` — `.env` / Vercel | 5 tentativas erradas bloqueiam o IP por 15 min |
+| API (RPi → site) | — | `PITEST_API_TOKEN` — Vercel **e** `/home/pi/test/.env` (iguais) | se diferentes, a tela mostra `✗ API: HTTP 401` |
+| Banco (Neon) | na própria URL | `DB_DATABASE_URL` — `.env` / Vercel | painel em neon.tech |
+| Servidor (Vercel) | conta `LeoGotardo` | login do Vercel | projeto `pitest`, domínio `pitest.leogotardo.com.br` |
+| Hotspot do teste | SSID `PiTest` | `pitest123` — `config.py` | não é segredo: é exibida na tela de propósito |
+| Bluetooth do teste | `PiTest <hostname>` | sem PIN — código de 6 dígitos exibido na tela | pareamento removido ao final do teste |
+
+**SSH:**
+
+| Item | Estado |
+|---|---|
+| Serviço | habilitado (Raspberry Pi Imager) — conferir: `systemctl is-active ssh` |
+| Porta | `22` |
+| Autenticação | senha do usuário `pi` (chave pública opcional em `~/.ssh/authorized_keys`) |
+| Rede | use **cabo**: o teste de hotspot tira a RPi da rede Wi-Fi |
+| Habilitar sem acesso | criar arquivo vazio `ssh` na partição `bootfs` do cartão |
+| IP | 2ª linha da tela do pitest (`IP eth0 …`) |
+
+**Outros acessos remotos:** nenhum (sem VNC/AnyDesk configurado pelo projeto).
+
+---
+
+## 6. Referência
 
 ### Testes executados
 
@@ -330,7 +400,7 @@ Histórico paginado com filtro por tipo.
 
 ---
 
-## 6. Versionamento e imagens
+## 7. Versionamento e imagens
 
 **Código:** versão semântica `MAJOR.MINOR.PATCH` em `pitest/pitest.py`
 (`__version__`), com tag git `vX.Y.Z` a cada release. Identificador de build:
